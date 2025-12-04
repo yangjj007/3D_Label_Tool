@@ -390,10 +390,10 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
   const vlmConfig = config?.vlm;
 
   if (!vlmConfig?.apiConfig?.baseUrl || !vlmConfig?.apiConfig?.apiKey) {
-    ElMessage.warning("请先在右侧配置 API 信息");
+    ElMessage.warning("请先配置右边api");
     return;
   }
-  if (!vlmConfig?.promptText) {
+  if (!vlmConfig?.promptList || vlmConfig.promptList.length === 0) {
     ElMessage.warning("请先在右侧配置提示词");
     return;
   }
@@ -473,7 +473,30 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
       if (!images.length) throw new Error("截图失败");
 
       // 2. 发送 VLM 请求 (并行)
-      const requests = images.map(imgs => [vlmConfig.promptText, imgs, {}]);
+      // 根据选择规则从提示词库中选择提示词
+      const selectPrompt = () => {
+        if (vlmConfig.promptList.length === 1) return vlmConfig.promptList[0].content;
+        
+        if (vlmConfig.selectionRule === 'random') {
+          const randomIndex = Math.floor(Math.random() * vlmConfig.promptList.length);
+          return vlmConfig.promptList[randomIndex].content;
+        } else {
+          // 加权选择
+          const totalWeight = vlmConfig.promptList.reduce((sum, p) => sum + (p.weight || 1), 0);
+          let random = Math.random() * totalWeight;
+          
+          for (const prompt of vlmConfig.promptList) {
+            random -= (prompt.weight || 1);
+            if (random <= 0) {
+              return prompt.content;
+            }
+          }
+          
+          return vlmConfig.promptList[0].content;
+        }
+      };
+      
+      const requests = images.map(imgs => [selectPrompt(), imgs, {}]);
       
       // 这里的 generateBatch 是针对一个文件的多个材质
       // 我们复用 vlmClient.generateBatch，它内部是并发控制的，
