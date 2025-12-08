@@ -945,23 +945,41 @@ const writeAutoTags = async (fileId, batchResultsData) => {
     }
 
     const applyLabelToMesh = (mesh, label) => {
-      if (!mesh || !label) return false;
+      if (!mesh || !label) {
+        console.warn(`[applyLabelToMesh] 参数无效: mesh=${!!mesh}, label=${!!label}`);
+        return false;
+      }
+      console.log(`[applyLabelToMesh] 应用标签到: ${mesh.name || mesh.uuid}, 标签: ${label.substring(0, 50)}...`);
       mesh.userData = mesh.userData || {};
       mesh.userData.semanticLabel = label;
       if (mesh.material) {
         mesh.material.userData = mesh.material.userData || {};
         mesh.material.userData.label = label;
+        console.log(`[applyLabelToMesh] 同时设置material.userData.label`);
       }
       if (store.modelApi) {
         store.modelApi.semanticLabels = store.modelApi.semanticLabels || {};
         store.modelApi.semanticLabels[mesh.uuid] = label;
+        console.log(`[applyLabelToMesh] 同时设置modelApi.semanticLabels[${mesh.uuid}]`);
       }
       return true;
     };
 
     const assignLabelByName = (name, label) => {
+      console.log(`[writeAutoTags] 尝试通过名称分配标签: "${name}" -> "${label?.substring(0, 50)}..."`);
       const mesh = store.modelApi?.model?.getObjectByName(name);
-      return applyLabelToMesh(mesh, label);
+      if (!mesh) {
+        console.warn(`[writeAutoTags] 未找到名为 "${name}" 的对象`);
+        return false;
+      }
+      console.log(`[writeAutoTags] 找到对象: ${mesh.name} (${mesh.type})`);
+      const result = applyLabelToMesh(mesh, label);
+      if (result) {
+        console.log(`[writeAutoTags] ✓ 成功分配标签到: ${mesh.name}`);
+      } else {
+        console.warn(`[writeAutoTags] ✗ 分配标签失败: ${mesh.name}`);
+      }
+      return result;
     };
 
     const assignLabelByUuid = (uuid, label) => {
@@ -1044,14 +1062,21 @@ const writeAutoTags = async (fileId, batchResultsData) => {
     }
 
     if (isGlbFile) {
+      console.log(`[writeAutoTags] 处理GLB文件`);
       let updatedCount = 0;
       if (validBatchResults.length) {
+        console.log(`[writeAutoTags] 批量写入模式，共 ${validBatchResults.length} 个标签`);
+        validBatchResults.forEach((res, idx) => {
+          console.log(`[writeAutoTags] 批量结果 ${idx + 1}: materialName="${res.materialName}", text="${res.text?.substring(0, 50)}..."`);
+        });
         for (const res of validBatchResults) {
           if (assignLabelByName(res.materialName, res.text)) {
             updatedCount++;
           }
         }
+        console.log(`[writeAutoTags] 批量写入完成，成功: ${updatedCount}/${validBatchResults.length}`);
       } else if (hasSingle) {
+        console.log(`[writeAutoTags] 单次写入模式`);
         if (!selectedUuid.value) {
           ElMessage.warning("请先选择一个材质以确定写入目标");
           return;

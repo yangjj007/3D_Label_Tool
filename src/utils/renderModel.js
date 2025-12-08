@@ -282,29 +282,148 @@ class renderModel {
           switch (fileType) {
             case "glb":
               this.model = result.scene;
-              console.log('[loadModel] GLB加载完成，检查userData...');
+              console.log('[loadModel] GLB加载完成，检查userData和extras...');
               
-              // 检查根节点是否有标签映射表
-              const semanticLabelsMap = result.scene.userData?._semanticLabels;
-              if (semanticLabelsMap && Object.keys(semanticLabelsMap).length > 0) {
-                console.log(`[loadModel] 发现标签映射表，共 ${Object.keys(semanticLabelsMap).length} 个标签`);
-                console.log(`[loadModel] 标签映射表:`, semanticLabelsMap);
+              // 手动从GLTF JSON中读取extras并设置到userData
+              // GLTFLoader可能不会自动将extras加载到userData
+              let foundLabels = 0;
+              
+              if (result.parser && result.parser.json) {
+                console.log('[loadModel] 检查GLTF JSON中的nodes extras...');
+                const gltfJson = result.parser.json;
                 
-                // 恢复标签到各个对象
-                let restoredCount = 0;
+                // 打印所有节点信息以便调试
+                if (gltfJson.nodes) {
+                  console.log(`[loadModel] GLTF JSON中共有 ${gltfJson.nodes.length} 个节点`);
+                  gltfJson.nodes.forEach((node, index) => {
+                    console.log(`[loadModel] 节点 ${index}: name="${node.name}", hasExtras=${!!node.extras}`, node.extras ? Object.keys(node.extras) : '');
+                  });
+                }
+                
+                // 规范化名称的辅助函数
+                const normalizeName = (name) => {
+                  if (!name) return '';
+                  return name.replace(/[_\->]/g, ' ').replace(/\s+/g, ' ').trim();
+                };
+                
+                // 创建节点名称到extras的映射（包括规范化后的名称）
+                const nodeExtrasMap = new Map();
+                if (gltfJson.nodes) {
+                  gltfJson.nodes.forEach((node, index) => {
+                    if (node.extras && node.extras.semanticLabel) {
+                      // 使用原始名称
+                      if (node.name) {
+                        nodeExtrasMap.set(node.name, node.extras.semanticLabel);
+                        // 也使用规范化后的名称
+                        const normalized = normalizeName(node.name);
+                        if (normalized && normalized !== node.name) {
+                          nodeExtrasMap.set(normalized, node.extras.semanticLabel);
+                        }
+                      }
+                      console.log(`[loadModel] GLTF JSON中节点 ${index} (${node.name}) 有extras.semanticLabel:`, node.extras.semanticLabel.substring(0, 50));
+                    }
+                  });
+                }
+                
+                // 创建mesh名称到extras的映射（包括规范化后的名称）
+                const meshExtrasMap = new Map();
+                if (gltfJson.meshes) {
+                  console.log(`[loadModel] GLTF JSON中共有 ${gltfJson.meshes.length} 个mesh`);
+                  gltfJson.meshes.forEach((mesh, index) => {
+                    if (mesh.extras && mesh.extras.semanticLabel) {
+                      // 使用原始名称
+                      if (mesh.name) {
+                        meshExtrasMap.set(mesh.name, mesh.extras.semanticLabel);
+                        // 也使用规范化后的名称
+                        const normalized = normalizeName(mesh.name);
+                        if (normalized && normalized !== mesh.name) {
+                          meshExtrasMap.set(normalized, mesh.extras.semanticLabel);
+                        }
+                      }
+                      console.log(`[loadModel] GLTF JSON中mesh ${index} (${mesh.name}) 有extras.semanticLabel:`, mesh.extras.semanticLabel.substring(0, 50));
+                    }
+                  });
+                }
+                
+                console.log(`[loadModel] nodeExtrasMap大小: ${nodeExtrasMap.size}, meshExtrasMap大小: ${meshExtrasMap.size}`);
+                
+                // 将extras应用到场景中的对象
                 result.scene.traverse(child => {
-                  const childName = child.name || child.uuid;
-                  if (semanticLabelsMap[childName]) {
-                    child.userData = child.userData || {};
-                    child.userData.semanticLabel = semanticLabelsMap[childName];
-                    console.log(`[loadModel] ✓ 恢复标签: ${childName} -> ${semanticLabelsMap[childName].substring(0, 50)}...`);
-                    restoredCount++;
+                  // 从节点名称匹配（精确匹配或规范化匹配）
+                  if (child.name) {
+                    let label = null;
+                    // 1. 精确匹配
+                    if (nodeExtrasMap.has(child.name)) {
+                      label = nodeExtrasMap.get(child.name);
+                    }
+                    // 2. 规范化匹配
+                    else {
+                      const normalized = normalizeName(child.name);
+                      if (normalized && nodeExtrasMap.has(normalized)) {
+                        label = nodeExtrasMap.get(normalized);
+                      }
+                    }
+                    
+                    if (label) {
+                      child.userData = child.userData || {};
+                      child.userData.semanticLabel = label;
+                      foundLabels++;
+                      console.log(`[loadModel] ✓ 从GLTF JSON节点找到semanticLabel: ${child.name} -> ${label.substring(0, 50)}...`);
+                    }
+                    // 从mesh名称匹配（如果节点没有找到，尝试mesh）
+                    else if (child.isMesh && meshExtrasMap.has(child.name)) {
+                      child.userData = child.userData || {};
+                      child.userData.semanticLabel = meshExtrasMap.get(child.name);
+                      foundLabels++;
+                      console.log(`[loadModel] ✓ 从GLTF JSON mesh找到semanticLabel: ${child.name} -> ${child.userData.semanticLabel.substring(0, 50)}...`);
+                    }
+                    else if (child.isMesh) {
+                      const normalized = normalizeName(child.name);
+                      if (normalized && meshExtrasMap.has(normalized)) {
+                        child.userData = child.userData || {};
+                        child.userData.semanticLabel = meshExtrasMap.get(normalized);
+                        foundLabels++;
+                        console.log(`[loadModel] ✓ 从GLTF JSON mesh(规范化)找到semanticLabel: ${child.name} -> ${child.userData.semanticLabel.substring(0, 50)}...`);
+                      }
+                    }
+                  }
+                  // 检查userData中是否已有标签
+                  else if (child.userData) {
+                    if (child.userData.semanticLabel) {
+                      foundLabels++;
+                      console.log(`[loadModel] ✓ 找到semanticLabel: ${child.name || child.uuid} -> ${child.userData.semanticLabel.substring(0, 50)}...`);
+                    } else if (child.userData.extras && child.userData.extras.semanticLabel) {
+                      child.userData.semanticLabel = child.userData.extras.semanticLabel;
+                      foundLabels++;
+                      console.log(`[loadModel] ✓ 从userData.extras找到semanticLabel: ${child.name || child.uuid} -> ${child.userData.semanticLabel.substring(0, 50)}...`);
+                    } else if (child.userData.label) {
+                      child.userData.semanticLabel = child.userData.label;
+                      foundLabels++;
+                      console.log(`[loadModel] ✓ 找到label并转换为semanticLabel: ${child.name || child.uuid} -> ${child.userData.semanticLabel.substring(0, 50)}...`);
+                    }
                   }
                 });
-                console.log(`[loadModel] 成功恢复 ${restoredCount} 个标签`);
               } else {
-                console.log(`[loadModel] 未发现标签映射表`);
+                // 如果没有parser.json，尝试从userData中查找
+                result.scene.traverse(child => {
+                  if (child.userData) {
+                    if (child.userData.semanticLabel) {
+                      foundLabels++;
+                      console.log(`[loadModel] ✓ 找到semanticLabel: ${child.name || child.uuid} -> ${child.userData.semanticLabel.substring(0, 50)}...`);
+                    } else if (child.userData.extras && child.userData.extras.semanticLabel) {
+                      child.userData.semanticLabel = child.userData.extras.semanticLabel;
+                      foundLabels++;
+                      console.log(`[loadModel] ✓ 从userData.extras找到semanticLabel: ${child.name || child.uuid} -> ${child.userData.semanticLabel.substring(0, 50)}...`);
+                    } else if (child.userData.label) {
+                      child.userData.semanticLabel = child.userData.label;
+                      foundLabels++;
+                      console.log(`[loadModel] ✓ 找到label并转换为semanticLabel: ${child.name || child.uuid} -> ${child.userData.semanticLabel.substring(0, 50)}...`);
+                    }
+                  }
+                });
               }
+              
+              console.log(`[loadModel] 加载后共发现 ${foundLabels} 个带标签的对象`);
               break;
             case "fbx":
               this.model = result;
@@ -340,9 +459,10 @@ class renderModel {
           this.modelProgressCallback(xhr.loaded, xhr.total);
         },
         err => {
-          ElMessage.error("文件错误");
-          console.log(err);
-          resolve(true);
+          console.error('[loadModel] 模型加载失败:', err);
+          ElMessage.error("文件错误: " + (err.message || '未知错误'));
+          // 加载失败时应该返回false，而不是true
+          resolve(false);
         }
       );
     });
@@ -722,30 +842,33 @@ class renderModel {
         return;
       }
       
-      console.log('[exportSceneToGlbBlob] 开始导出，收集所有标签...');
+      console.log('[exportSceneToGlbBlob] 开始导出，检查userData...');
       
-      // 收集所有语义标签到一个映射表
-      const semanticLabelsMap = {};
-      let labelCount = 0;
-      
+      // 收集所有需要导出的标签映射（使用UUID作为key，因为名称可能被规范化）
+      const labelMapByUuid = new Map();
+      const labelMapByName = new Map();
       target.traverse(child => {
         const label = child.userData?.semanticLabel || child.material?.userData?.label;
         if (label) {
-          // 使用name作为key（因为name会被保留）
-          semanticLabelsMap[child.name || child.uuid] = label;
-          console.log(`[exportSceneToGlbBlob] 收集标签: ${child.name || child.uuid} -> ${label.substring(0, 50)}...`);
-          labelCount++;
+          // 使用UUID作为主要key
+          labelMapByUuid.set(child.uuid, label);
+          // 同时保存名称映射（用于备用匹配）
+          if (child.name) {
+            labelMapByName.set(child.name, label);
+            // 也保存规范化后的名称（去除特殊字符，统一为空格）
+            const normalizedName = child.name.replace(/[_\->]/g, ' ').replace(/\s+/g, ' ').trim();
+            if (normalizedName && normalizedName !== child.name) {
+              labelMapByName.set(normalizedName, label);
+            }
+          }
+          // 确保label在userData中
+          child.userData = child.userData || {};
+          child.userData.semanticLabel = label;
+          console.log(`[exportSceneToGlbBlob] 准备导出标签: ${child.name || child.uuid} -> ${label.substring(0, 50)}...`);
         }
       });
       
-      console.log(`[exportSceneToGlbBlob] 共收集 ${labelCount} 个标签`);
-      
-      // 将标签映射表存储到根节点的userData中
-      if (labelCount > 0) {
-        target.userData = target.userData || {};
-        target.userData._semanticLabels = semanticLabelsMap;
-        console.log('[exportSceneToGlbBlob] 标签已保存到根节点userData._semanticLabels');
-      }
+      console.log(`[exportSceneToGlbBlob] 导出前共有 ${labelMapByUuid.size} 个带标签的对象`);
       
       const exporter = new GLTFExporter();
       const options = {
@@ -760,9 +883,17 @@ class renderModel {
         target,
         result => {
           if (result instanceof ArrayBuffer) {
-            const blob = new Blob([result], { type: "application/octet-stream" });
-            console.log(`[exportSceneToGlbBlob] 导出成功，文件大小: ${blob.size} bytes`);
-            resolve(blob);
+            // 解析GLB文件，手动添加extras字段
+            try {
+              const glbBlob = this.addSemanticLabelsToGlb(result, labelMapByName, labelMapByUuid);
+              console.log(`[exportSceneToGlbBlob] 导出成功，文件大小: ${glbBlob.size} bytes`);
+              resolve(glbBlob);
+            } catch (err) {
+              console.error('[exportSceneToGlbBlob] 添加标签到GLB失败，使用原始文件:', err);
+              // 如果失败，返回原始文件
+              const blob = new Blob([result], { type: "application/octet-stream" });
+              resolve(blob);
+            }
           } else {
             reject(new Error("GLB 导出结果为空"));
           }
@@ -774,6 +905,244 @@ class renderModel {
         options
       );
     });
+  }
+
+  // 验证GLB文件格式
+  validateGlbFile(glbArrayBuffer) {
+    try {
+      const dataView = new DataView(glbArrayBuffer);
+      
+      // 检查文件大小
+      if (glbArrayBuffer.byteLength < 12) {
+        return { valid: false, error: 'GLB文件太小（< 12 bytes）' };
+      }
+      
+      // 检查魔数
+      const magic = dataView.getUint32(0, true);
+      if (magic !== 0x46546C67) { // "glTF"
+        return { valid: false, error: `无效的GLB魔数: 0x${magic.toString(16)}` };
+      }
+      
+      // 检查版本
+      const version = dataView.getUint32(4, true);
+      if (version !== 2) {
+        return { valid: false, error: `不支持的GLB版本: ${version}` };
+      }
+      
+      // 检查总长度
+      const length = dataView.getUint32(8, true);
+      if (length !== glbArrayBuffer.byteLength) {
+        return { valid: false, error: `GLB长度不匹配: 头部声明${length}, 实际${glbArrayBuffer.byteLength}` };
+      }
+      
+      // 检查JSON块
+      if (glbArrayBuffer.byteLength < 20) {
+        return { valid: false, error: 'GLB文件缺少JSON块' };
+      }
+      
+      const jsonChunkLength = dataView.getUint32(12, true);
+      const jsonChunkType = dataView.getUint32(16, true);
+      
+      if (jsonChunkType !== 0x4E4F534A) { // "JSON"
+        return { valid: false, error: `无效的JSON块类型: 0x${jsonChunkType.toString(16)}` };
+      }
+      
+      // 尝试解析JSON
+      const jsonStart = 20;
+      const jsonEnd = jsonStart + jsonChunkLength;
+      
+      if (jsonEnd > glbArrayBuffer.byteLength) {
+        return { valid: false, error: `JSON块超出文件范围: ${jsonEnd} > ${glbArrayBuffer.byteLength}` };
+      }
+      
+      const jsonText = new TextDecoder().decode(glbArrayBuffer.slice(jsonStart, jsonEnd));
+      
+      try {
+        JSON.parse(jsonText);
+      } catch (jsonErr) {
+        return { valid: false, error: `JSON解析失败: ${jsonErr.message}` };
+      }
+      
+      return { valid: true };
+    } catch (err) {
+      return { valid: false, error: `验证失败: ${err.message}` };
+    }
+  }
+  
+  // 将语义标签添加到GLB文件的extras字段
+  addSemanticLabelsToGlb(glbArrayBuffer, labelMapByName, labelMapByUuid) {
+    if (labelMapByName.size === 0 && labelMapByUuid.size === 0) {
+      return new Blob([glbArrayBuffer], { type: "application/octet-stream" });
+    }
+
+    // 先验证文件格式
+    const validation = this.validateGlbFile(glbArrayBuffer);
+    if (!validation.valid) {
+      console.error('[addSemanticLabelsToGlb] GLB文件验证失败:', validation.error);
+      throw new Error(`GLB文件格式错误: ${validation.error}`);
+    }
+
+    // GLB文件格式：12字节头部 + JSON块 + BIN块
+    const dataView = new DataView(glbArrayBuffer);
+    
+    // 读取GLB头部
+    const magic = dataView.getUint32(0, true);
+    const version = dataView.getUint32(4, true);
+    const length = dataView.getUint32(8, true);
+    
+    if (magic !== 0x46546C67) { // "glTF"
+      throw new Error("无效的GLB文件格式");
+    }
+    
+    // 读取JSON块
+    const jsonChunkLength = dataView.getUint32(12, true);
+    const jsonChunkType = dataView.getUint32(16, true);
+    
+    if (jsonChunkType !== 0x4E4F534A) { // "JSON"
+      throw new Error("GLB文件格式错误：找不到JSON块");
+    }
+    
+    // 解析JSON
+    const jsonStart = 20;
+    const jsonEnd = jsonStart + jsonChunkLength;
+    const jsonText = new TextDecoder().decode(glbArrayBuffer.slice(jsonStart, jsonEnd));
+    const gltf = JSON.parse(jsonText);
+    
+    // 规范化名称的辅助函数（去除特殊字符，统一为空格）
+    const normalizeName = (name) => {
+      if (!name) return '';
+      return name.replace(/[_\->]/g, ' ').replace(/\s+/g, ' ').trim();
+    };
+    
+    // 打印所有可用的标签映射
+    console.log(`[addSemanticLabelsToGlb] 可用的标签映射:`, Array.from(labelMapByName.entries()).map(([k, v]) => `${k} -> ${v.substring(0, 30)}...`));
+    
+    // 将标签添加到nodes的extras字段
+    if (gltf.nodes) {
+      console.log(`[addSemanticLabelsToGlb] GLTF共有 ${gltf.nodes.length} 个节点`);
+      gltf.nodes.forEach((node, index) => {
+        let label = null;
+        let matchType = null;
+        
+        // 1. 尝试精确匹配名称
+        if (node.name && labelMapByName.has(node.name)) {
+          label = labelMapByName.get(node.name);
+          matchType = '精确匹配';
+        }
+        // 2. 尝试规范化后的名称匹配
+        else if (node.name) {
+          const normalized = normalizeName(node.name);
+          if (normalized && labelMapByName.has(normalized)) {
+            label = labelMapByName.get(normalized);
+            matchType = '规范化匹配';
+          }
+        }
+        
+        if (label) {
+          node.extras = node.extras || {};
+          node.extras.semanticLabel = label;
+          console.log(`[addSemanticLabelsToGlb] ✓ ${matchType} - 节点 ${index} "${node.name}" -> ${label.substring(0, 50)}...`);
+        } else {
+          console.log(`[addSemanticLabelsToGlb] ✗ 未匹配 - 节点 ${index} "${node.name}"`);
+        }
+      });
+    }
+    
+    // 将标签添加到meshes的extras字段
+    if (gltf.meshes) {
+      console.log(`[addSemanticLabelsToGlb] GLTF共有 ${gltf.meshes.length} 个mesh`);
+      gltf.meshes.forEach((mesh, index) => {
+        let label = null;
+        let matchType = null;
+        
+        // 1. 尝试精确匹配名称
+        if (mesh.name && labelMapByName.has(mesh.name)) {
+          label = labelMapByName.get(mesh.name);
+          matchType = '精确匹配';
+        }
+        // 2. 尝试规范化后的名称匹配
+        else if (mesh.name) {
+          const normalized = normalizeName(mesh.name);
+          if (normalized && labelMapByName.has(normalized)) {
+            label = labelMapByName.get(normalized);
+            matchType = '规范化匹配';
+          }
+        }
+        
+        if (label) {
+          mesh.extras = mesh.extras || {};
+          mesh.extras.semanticLabel = label;
+          console.log(`[addSemanticLabelsToGlb] ✓ ${matchType} - mesh ${index} "${mesh.name}" -> ${label.substring(0, 50)}...`);
+        } else {
+          console.log(`[addSemanticLabelsToGlb] ✗ 未匹配 - mesh ${index} "${mesh.name}"`);
+        }
+      });
+    }
+    
+    // 重新编码JSON
+    const newJsonText = JSON.stringify(gltf);
+    const newJsonBuffer = new TextEncoder().encode(newJsonText);
+    
+    console.log(`[addSemanticLabelsToGlb] JSON字符串长度: ${newJsonText.length}, 编码后: ${newJsonBuffer.length} bytes`);
+    
+    // 计算新的JSON块长度（必须是4的倍数）
+    const paddedJsonLength = Math.ceil(newJsonBuffer.length / 4) * 4;
+    const paddingSize = paddedJsonLength - newJsonBuffer.length;
+    // GLB规范要求JSON块的padding必须是空格字符（0x20），而不是null（0x00）
+    const jsonPadding = new Uint8Array(paddingSize).fill(0x20);
+    
+    console.log(`[addSemanticLabelsToGlb] JSON块长度: ${newJsonBuffer.length} -> ${paddedJsonLength} (padding: ${paddingSize} bytes)`);
+    
+    // 读取BIN块（如果存在）
+    const binChunkStart = jsonEnd;
+    let binChunkLength = 0;
+    let binChunkType = 0;
+    let binData = new Uint8Array(0);
+    
+    if (binChunkStart < glbArrayBuffer.byteLength) {
+      binChunkLength = dataView.getUint32(binChunkStart, true);
+      binChunkType = dataView.getUint32(binChunkStart + 4, true);
+      if (binChunkType === 0x004E4942) { // "BIN\0"
+        binData = new Uint8Array(glbArrayBuffer.slice(binChunkStart + 8, binChunkStart + 8 + binChunkLength));
+      } else {
+        binChunkLength = 0; // 没有BIN块
+      }
+    }
+    
+    // 构建新的GLB文件
+    const binChunkHeaderSize = binChunkLength > 0 ? 8 : 0;
+    const newLength = 12 + 8 + paddedJsonLength + binChunkHeaderSize + binChunkLength;
+    const newGlb = new ArrayBuffer(newLength);
+    const newDataView = new DataView(newGlb);
+    const newUint8Array = new Uint8Array(newGlb);
+    
+    let offset = 0;
+    
+    // 写入头部
+    newDataView.setUint32(offset, magic, true); offset += 4;
+    newDataView.setUint32(offset, version, true); offset += 4;
+    newDataView.setUint32(offset, newLength, true); offset += 4;
+    
+    // 写入JSON块
+    newDataView.setUint32(offset, paddedJsonLength, true); offset += 4;
+    newDataView.setUint32(offset, jsonChunkType, true); offset += 4;
+    newUint8Array.set(newJsonBuffer, offset);
+    offset += newJsonBuffer.length;
+    if (jsonPadding.length > 0) {
+      newUint8Array.set(jsonPadding, offset);
+      offset += jsonPadding.length;
+    }
+    
+    // 写入BIN块（如果存在）
+    if (binChunkLength > 0) {
+      newDataView.setUint32(offset, binChunkLength, true); offset += 4;
+      newDataView.setUint32(offset, 0x004E4942, true); offset += 4; // "BIN\0"
+      newUint8Array.set(binData, offset);
+    }
+    
+    console.log(`[addSemanticLabelsToGlb] 最终GLB文件大小: ${newLength} bytes (头部: 12, JSON块: ${8 + paddedJsonLength}, BIN块: ${binChunkHeaderSize + binChunkLength})`);
+    
+    return new Blob([newGlb], { type: "application/octet-stream" });
   }
   // 导出模型
   onExporterModel(type) {

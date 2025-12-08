@@ -254,15 +254,20 @@ app.get('/api/download/:fileId', (req, res) => {
   try {
     const { fileId } = req.params;
     
-    // 尝试在raw和labeled目录中查找文件
-    let filePath = path.join(RAW_FILES_DIR, fileId);
+    // 优先从labeled目录查找（已打标的文件优先），如果不存在则从raw目录查找
+    let filePath = path.join(LABELED_FILES_DIR, fileId);
+    let fromLabeled = true;
+    
     if (!fs.existsSync(filePath)) {
-      filePath = path.join(LABELED_FILES_DIR, fileId);
+      filePath = path.join(RAW_FILES_DIR, fileId);
+      fromLabeled = false;
     }
     
     if (!fs.existsSync(filePath)) {
       return res.status(404).json({ error: '文件不存在' });
     }
+    
+    console.log(`[下载] 文件: ${fileId}, 来源: ${fromLabeled ? 'labeled_files' : 'raw_files'}, 大小: ${fs.statSync(filePath).size} bytes`);
     
     const stats = fs.statSync(filePath);
     const fileSize = stats.size;
@@ -313,12 +318,13 @@ app.post('/api/batch-download', (req, res) => {
     }
     
     const filesInfo = fileIds.map(fileId => {
-      let filePath = path.join(RAW_FILES_DIR, fileId);
-      let type = 'raw';
+      // 优先从labeled目录查找
+      let filePath = path.join(LABELED_FILES_DIR, fileId);
+      let type = 'labeled';
       
       if (!fs.existsSync(filePath)) {
-        filePath = path.join(LABELED_FILES_DIR, fileId);
-        type = 'labeled';
+        filePath = path.join(RAW_FILES_DIR, fileId);
+        type = 'raw';
       }
       
       if (!fs.existsSync(filePath)) {
@@ -356,12 +362,30 @@ app.post('/api/move-to-labeled', uploadChunk.single('file'), async (req, res) =>
     const rawPath = path.join(RAW_FILES_DIR, fileId);
     const labeledPath = path.join(LABELED_FILES_DIR, fileId);
     
+    console.log(`[move-to-labeled] 开始处理文件: ${fileId}`);
+    console.log(`[move-to-labeled] 是否上传了新文件: ${!!req.file}, 文件大小: ${req.file?.size || 'N/A'} bytes`);
+    
     if (req.file) {
       // 如果上传了新文件（已打标的版本），使用新文件
       fs.writeFileSync(labeledPath, req.file.buffer);
+      console.log(`[move-to-labeled] 新文件已写入 labeled_files: ${labeledPath}, 大小: ${req.file.size} bytes`);
+      
+      // 删除raw目录中的旧文件（如果存在）
+      if (fs.existsSync(rawPath)) {
+        fs.unlinkSync(rawPath);
+        console.log(`[move-to-labeled] 已删除 raw_files 中的旧文件: ${rawPath}`);
+        
+        // 删除旧的元数据文件
+        const rawMetaPath = rawPath + '.json';
+        if (fs.existsSync(rawMetaPath)) {
+          fs.unlinkSync(rawMetaPath);
+          console.log(`[move-to-labeled] 已删除 raw_files 中的旧元数据: ${rawMetaPath}`);
+        }
+      }
     } else if (fs.existsSync(rawPath)) {
       // 否则移动原文件
       fs.renameSync(rawPath, labeledPath);
+      console.log(`[move-to-labeled] 原文件已移动到 labeled_files: ${labeledPath}`);
       
       // 移动元数据文件
       const rawMetaPath = rawPath + '.json';
@@ -370,6 +394,7 @@ app.post('/api/move-to-labeled', uploadChunk.single('file'), async (req, res) =>
         fs.renameSync(rawMetaPath, labeledMetaPath);
       }
     } else {
+      console.error(`[move-to-labeled] 错误: 源文件不存在 - ${rawPath}`);
       return res.status(404).json({ error: '源文件不存在' });
     }
     
@@ -383,14 +408,19 @@ app.post('/api/move-to-labeled', uploadChunk.single('file'), async (req, res) =>
     };
     fs.writeFileSync(metadataPath, JSON.stringify(updatedMetadata, null, 2));
     
+    // 确认最终文件大小
+    const finalFileStats = fs.statSync(labeledPath);
+    console.log(`[move-to-labeled] 完成! labeled_files中的文件大小: ${finalFileStats.size} bytes`);
+    
     res.json({
       success: true,
       message: '文件已移动到已打标目录',
-      filename: fileId
+      filename: fileId,
+      size: finalFileStats.size
     });
     
   } catch (error) {
-    console.error('移动文件失败:', error);
+    console.error('[move-to-labeled] 移动文件失败:', error);
     res.status(500).json({ error: error.message });
   }
 });

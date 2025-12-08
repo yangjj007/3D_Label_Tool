@@ -60,6 +60,10 @@ export async function downloadModelFromServer(fileId, metadata, onProgress) {
       throw new Error('文件不存在');
     }
     
+    // 判断文件是否已打标（来自labeled_files目录）
+    const isFromLabeledDir = fileInfo.type === 'labeled' || metadata.hasLabels;
+    console.log(`[downloadModelFromServer] 下载文件: ${fileInfo.name}, 文件大小: ${fileInfo.size} bytes, 从labeled_files: ${isFromLabeledDir}`);
+    
     // 创建下载器
     const downloader = new ChunkedDownloader(
       fileId,
@@ -69,6 +73,7 @@ export async function downloadModelFromServer(fileId, metadata, onProgress) {
     
     // 下载文件
     const fileBlob = await downloader.download(onProgress);
+    console.log(`[downloadModelFromServer] 下载完成，文件大小: ${fileBlob.size} bytes, 从labeled_files: ${isFromLabeledDir}`);
     
     // 从文件名提取真实的文件格式（不使用服务器的 type，它表示 raw/labeled 状态）
     const actualFileType = getFileType(fileInfo.name);
@@ -80,13 +85,14 @@ export async function downloadModelFromServer(fileId, metadata, onProgress) {
       name: metadata.name || fileInfo.name,
       size: fileInfo.size,
       type: actualFileType, // 使用从文件名提取的真实文件类型
+      hasLabels: isFromLabeledDir || metadata.hasLabels, // 保存hasLabels标记
       isTemporary: metadata.isTemporary ?? true,
       serverFileId: metadata.serverFileId || fileId,
       batchNumber: metadata.batchNumber || null,
       isFromServer: true
     }, fileBlob);
     
-    return { success: true, fileId, size: fileInfo.size };
+    return { success: true, fileId, size: fileInfo.size, blob: fileBlob };
   } catch (error) {
     console.error('从服务器下载失败:', error);
     throw error;
@@ -142,6 +148,8 @@ export async function batchDownloadFiles(fileIds, onProgress) {
  */
 export async function moveToLabeled(fileId, labeledBlob, metadata) {
   try {
+    console.log(`[moveToLabeled] 开始上传，fileId: ${fileId}, blob大小: ${labeledBlob.size} bytes`);
+    
     const formData = new FormData();
     formData.append('file', labeledBlob, metadata.name || fileId);
     formData.append('fileId', fileId);
@@ -151,13 +159,26 @@ export async function moveToLabeled(fileId, labeledBlob, metadata) {
       updatedAt: new Date().toISOString()
     }));
     
+    console.log(`[moveToLabeled] FormData已构建，准备POST到 ${API_BASE_URL}/move-to-labeled`);
+    
     const response = await axios.post(`${API_BASE_URL}/move-to-labeled`, formData, {
-      headers: { 'Content-Type': 'multipart/form-data' }
+      headers: { 'Content-Type': 'multipart/form-data' },
+      onUploadProgress: (progressEvent) => {
+        const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+        console.log(`[moveToLabeled] 上传进度: ${percentCompleted}%`);
+      }
     });
     
+    console.log(`[moveToLabeled] 上传成功，服务器响应:`, response.data);
     return response.data;
   } catch (error) {
-    console.error('移动到已打标目录失败:', error);
+    console.error('[moveToLabeled] 移动到已打标目录失败:', error);
+    if (error.response) {
+      console.error('[moveToLabeled] 服务器响应错误:', {
+        status: error.response.status,
+        data: error.response.data
+      });
+    }
     throw error;
   }
 }

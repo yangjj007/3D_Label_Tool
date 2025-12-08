@@ -266,7 +266,13 @@ function handlePageSizeChange(size) {
 
 // 选择文件
 function onSelectFile(file) {
-  emit("select", file);
+  // 根据当前fileType，为文件添加hasLabels标记
+  const fileWithLabels = {
+    ...file,
+    hasLabels: fileType.value === 'labeled' || file.hasLabels,
+    isFromServer: true
+  };
+  emit("select", fileWithLabels);
 }
 
 // 处理文件选择（加载到工作区或打开）

@@ -165,12 +165,29 @@ const semanticLabelInfo = computed(() => {
 });
 
 const loadPersistedModelFile = async (file, silent = false) => {
-  console.log(`[loadPersistedModelFile] 尝试加载文件:`, { id: file.id, name: file.name, silent });
+  console.log(`[loadPersistedModelFile] 尝试加载文件:`, { id: file.id, name: file.name, silent, hasLabels: file.hasLabels, isFromServer: file.isFromServer });
   
   if (!store.modelApi?.onSwitchModel) {
     console.error(`[loadPersistedModelFile] modelApi.onSwitchModel 不存在`);
     if (!silent) ElMessage.warning("模型初始化尚未完成，请稍后再试");
     return false;
+  }
+
+  // 如果文件标记为已打标，优先从服务器的labeled_files下载最新版本
+  if (file.hasLabels || file.isFromServer) {
+    console.log(`[loadPersistedModelFile] 文件已打标，从服务器加载最新版本...`);
+    try {
+      const blob = await downloadModelFromServer(file.id, {
+        ...file,
+        id: file.id,
+        name: file.name,
+        hasLabels: true
+      });
+      console.log(`[loadPersistedModelFile] 从服务器下载完成，文件大小: ${blob?.size || 'unknown'} bytes`);
+    } catch (err) {
+      console.warn(`[loadPersistedModelFile] 从服务器下载失败，尝试使用本地缓存:`, err);
+      // 继续使用本地缓存
+    }
   }
 
   let record;
@@ -690,14 +707,14 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
       console.log(`[批量打标] 文件类型: ${isGlb ? 'GLB/GLTF' : 'OBJ'}`);
       
       if (isGlb) {
-        // GLB 需要重新加载场景来写入 (互斥)
+        // GLB 需要场景锁来写入和导出 (互斥)
         console.log(`[批量打标] 等待获取场景锁以写入标签...`);
         await sceneLock.acquire();
         console.log(`[批量打标] 已获取场景锁，开始写入标签`);
         try {
-           // 再次加载确保是当前文件
-           console.log(`[批量打标] 重新加载模型...`);
-           await loadPersistedModelFile(file, true);
+           // 不需要重新加载模型！直接在当前已加载的模型上写入标签
+           // 因为模型已经在截图时加载了，重新加载会覆盖已加载的模型
+           console.log(`[批量打标] 使用当前已加载的模型，直接写入标签...`);
            
            console.log(`[批量打标] 调用 writeAutoTags...`);
            await editPanel.value.writeAutoTags(file.id, batchResults);
@@ -705,6 +722,7 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
            // 4. 导出并上传到服务器labeled_files
            console.log(`[批量打标] 导出 GLB 文件...`);
            const modelBlob = await store.modelApi.exportSceneToGlbBlob();
+           console.log(`[批量打标] 导出完成，文件大小: ${modelBlob.size} bytes`);
            
            console.log(`[批量打标] 上传到服务器 labeled_files...`);
            await moveToLabeled(file.serverFileId || file.id, modelBlob, {

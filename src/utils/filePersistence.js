@@ -32,13 +32,30 @@ const openDatabase = () => {
 };
 
 const sanitizeRecord = (metadata, fileBlob) => {
+  // 清理labels，确保只包含可序列化的数据
+  let cleanLabels = [];
+  if (Array.isArray(metadata.labels)) {
+    cleanLabels = metadata.labels.map(label => {
+      if (typeof label === 'string') return label;
+      if (label && typeof label === 'object') {
+        // 只提取基本属性
+        return {
+          text: label.text || '',
+          materialName: label.materialName || '',
+          targetMaterialName: label.targetMaterialName || ''
+        };
+      }
+      return String(label);
+    });
+  }
+  
   const record = {
     id: metadata.id,
     name: metadata.name,
     size: metadata.size ?? (fileBlob?.size ?? 0),
     type: metadata.type ?? (fileBlob?.type ?? ""),
     folder: metadata.folder || STORAGE_FOLDER,
-    labels: metadata.labels || [],
+    labels: cleanLabels,
     hasLabels: metadata.hasLabels || false,
     updatedAt: metadata.updatedAt || new Date().toISOString(),
     fileBlob: fileBlob || metadata.fileBlob || null,
