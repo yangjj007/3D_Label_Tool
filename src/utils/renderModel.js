@@ -282,6 +282,29 @@ class renderModel {
           switch (fileType) {
             case "glb":
               this.model = result.scene;
+              console.log('[loadModel] GLB加载完成，检查userData...');
+              
+              // 检查根节点是否有标签映射表
+              const semanticLabelsMap = result.scene.userData?._semanticLabels;
+              if (semanticLabelsMap && Object.keys(semanticLabelsMap).length > 0) {
+                console.log(`[loadModel] 发现标签映射表，共 ${Object.keys(semanticLabelsMap).length} 个标签`);
+                console.log(`[loadModel] 标签映射表:`, semanticLabelsMap);
+                
+                // 恢复标签到各个对象
+                let restoredCount = 0;
+                result.scene.traverse(child => {
+                  const childName = child.name || child.uuid;
+                  if (semanticLabelsMap[childName]) {
+                    child.userData = child.userData || {};
+                    child.userData.semanticLabel = semanticLabelsMap[childName];
+                    console.log(`[loadModel] ✓ 恢复标签: ${childName} -> ${semanticLabelsMap[childName].substring(0, 50)}...`);
+                    restoredCount++;
+                  }
+                });
+                console.log(`[loadModel] 成功恢复 ${restoredCount} 个标签`);
+              } else {
+                console.log(`[loadModel] 未发现标签映射表`);
+              }
               break;
             case "fbx":
               this.model = result;
@@ -350,26 +373,38 @@ class renderModel {
   getMeshSemanticLabel(mesh) {
     if (!mesh) return null;
     const userData = mesh.userData || {};
-    if (userData.label) return userData.label;
-    if (userData.semanticLabel) return userData.semanticLabel;
+    if (userData.label) {
+      console.log(`[getMeshSemanticLabel] 从 userData.label 读取: ${mesh.name || mesh.uuid}`);
+      return userData.label;
+    }
+    if (userData.semanticLabel) {
+      console.log(`[getMeshSemanticLabel] 从 userData.semanticLabel 读取: ${mesh.name || mesh.uuid}`);
+      return userData.semanticLabel;
+    }
     const materialUserData = mesh.material?.userData;
-    if (materialUserData?.label) return materialUserData.label;
+    if (materialUserData?.label) {
+      console.log(`[getMeshSemanticLabel] 从 material.userData.label 读取: ${mesh.name || mesh.uuid}`);
+      return materialUserData.label;
+    }
     return null;
   }
 
   parseSceneSemanticLabels(sceneRoot = this.model) {
     const labels = {};
     if (!sceneRoot || typeof sceneRoot.traverse !== "function") return labels;
+    console.log('[parseSceneSemanticLabels] 开始解析场景语义标签');
     sceneRoot.traverse(child => {
       if (!child.isMesh) return;
       const label = this.getMeshSemanticLabel(child);
       if (label) {
+        console.log(`[parseSceneSemanticLabels] 找到标签: ${child.name || child.uuid} -> ${label.substring(0, 50)}...`);
         child.userData = child.userData || {};
         child.userData.semanticLabel = label;
         labels[child.uuid] = label;
       }
     });
     this.semanticLabels = labels;
+    console.log(`[parseSceneSemanticLabels] 共找到 ${Object.keys(labels).length} 个语义标签`);
     return labels;
   }
   // 设置材质辉光
@@ -686,6 +721,32 @@ class renderModel {
         reject(new Error("当前模型尚未加载完成，无法导出"));
         return;
       }
+      
+      console.log('[exportSceneToGlbBlob] 开始导出，收集所有标签...');
+      
+      // 收集所有语义标签到一个映射表
+      const semanticLabelsMap = {};
+      let labelCount = 0;
+      
+      target.traverse(child => {
+        const label = child.userData?.semanticLabel || child.material?.userData?.label;
+        if (label) {
+          // 使用name作为key（因为name会被保留）
+          semanticLabelsMap[child.name || child.uuid] = label;
+          console.log(`[exportSceneToGlbBlob] 收集标签: ${child.name || child.uuid} -> ${label.substring(0, 50)}...`);
+          labelCount++;
+        }
+      });
+      
+      console.log(`[exportSceneToGlbBlob] 共收集 ${labelCount} 个标签`);
+      
+      // 将标签映射表存储到根节点的userData中
+      if (labelCount > 0) {
+        target.userData = target.userData || {};
+        target.userData._semanticLabels = semanticLabelsMap;
+        console.log('[exportSceneToGlbBlob] 标签已保存到根节点userData._semanticLabels');
+      }
+      
       const exporter = new GLTFExporter();
       const options = {
         trs: true,
@@ -700,12 +761,16 @@ class renderModel {
         result => {
           if (result instanceof ArrayBuffer) {
             const blob = new Blob([result], { type: "application/octet-stream" });
+            console.log(`[exportSceneToGlbBlob] 导出成功，文件大小: ${blob.size} bytes`);
             resolve(blob);
           } else {
             reject(new Error("GLB 导出结果为空"));
           }
         },
-        error => reject(error),
+        error => {
+          console.error('[exportSceneToGlbBlob] 导出失败:', error);
+          reject(error);
+        },
         options
       );
     });

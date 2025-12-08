@@ -2,6 +2,7 @@ import axios from 'axios';
 import { ChunkedUploader } from './chunkedUpload';
 import { ChunkedDownloader } from './chunkedDownload';
 import { saveModelFile, deleteModelFile, listFolderFiles } from './filePersistence';
+import { getFileType } from './utilityFunction';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001/api';
 
@@ -69,12 +70,16 @@ export async function downloadModelFromServer(fileId, metadata, onProgress) {
     // 下载文件
     const fileBlob = await downloader.download(onProgress);
     
+    // 从文件名提取真实的文件格式（不使用服务器的 type，它表示 raw/labeled 状态）
+    const actualFileType = getFileType(fileInfo.name);
+    
     // 保存到IndexedDB
     await saveModelFile({
       ...metadata,
       id: metadata.id || fileId,
       name: metadata.name || fileInfo.name,
       size: fileInfo.size,
+      type: actualFileType, // 使用从文件名提取的真实文件类型
       isTemporary: metadata.isTemporary ?? true,
       serverFileId: metadata.serverFileId || fileId,
       batchNumber: metadata.batchNumber || null,

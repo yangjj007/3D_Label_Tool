@@ -50,6 +50,7 @@
         <div class="left-panel-content">
           <div v-show="activeLeftTab === 'fileList'" class="panel-content">
             <file-list
+              ref="fileListRef"
               :files="fileStore.files"
               :selected-file-id="fileStore.selectedFileId"
               :is-batch-processing="isBatchProcessing"
@@ -103,7 +104,7 @@
 
 <script setup name="modelEdit">
 import { ModelEditPanel, ModelChoose, ImplantCodeDialog, FileList } from "@/components/index";
-import { onMounted, ref, getCurrentInstance, onBeforeUnmount, computed } from "vue";
+import { onMounted, ref, getCurrentInstance, onBeforeUnmount, computed, unref, isRef } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { getFileType } from "@/utils/utilityFunction";
@@ -131,6 +132,7 @@ const loading = ref(false);
 const progress = ref(0);
 const editPanel = ref(null);
 const choosePanel = ref(null);
+const fileListRef = ref(null);
 const implantDialog = ref(null);
 const fullscreenStatus = ref(false);
 const loadingTimeout = ref(null);
@@ -163,28 +165,44 @@ const semanticLabelInfo = computed(() => {
 });
 
 const loadPersistedModelFile = async (file, silent = false) => {
+  console.log(`[loadPersistedModelFile] 尝试加载文件:`, { id: file.id, name: file.name, silent });
+  
   if (!store.modelApi?.onSwitchModel) {
+    console.error(`[loadPersistedModelFile] modelApi.onSwitchModel 不存在`);
     if (!silent) ElMessage.warning("模型初始化尚未完成，请稍后再试");
     return false;
   }
 
   let record;
   try {
+    console.log(`[loadPersistedModelFile] 从 IndexedDB 读取文件，ID: ${file.id}`);
     record = await getModelFile(file.id);
+    console.log(`[loadPersistedModelFile] IndexedDB 返回:`, record ? { 
+      id: record.id, 
+      name: record.name, 
+      hasBlob: !!record.fileBlob,
+      blobSize: record.fileBlob?.size 
+    } : null);
   } catch (err) {
-    console.error("读取模型数据失败", err);
+    console.error(`[loadPersistedModelFile] 读取模型数据失败:`, err);
     if (!silent) ElMessage.error("读取模型文件失败");
     return false;
   }
 
   if (!record || !record.fileBlob) {
+    console.error(`[loadPersistedModelFile] 记录为空或缺少 fileBlob:`, { 
+      hasRecord: !!record, 
+      hasBlob: !!record?.fileBlob 
+    });
     if (!silent) ElMessage.warning("当前文件未保存模型数据，请重新上传");
     return false;
   }
 
-  const fileType = record.type || getFileType(record.name || file.name);
+  // 从文件名提取真实的文件格式（不使用 record.type，因为它可能是 'raw'/'labeled' 状态而非格式）
+  const fileType = getFileType(record.name || file.name);
   const normalizedFileType = (fileType || "").toLowerCase();
   const fileName = record.name || file.name;
+  console.log(`[loadPersistedModelFile] 文件类型: ${fileType}，文件名: ${fileName}`);
   let objLabelMap = {};
   const shouldParseObj =
     normalizedFileType === "obj" || (fileName && fileName.toLowerCase().endsWith(".obj"));
@@ -207,16 +225,24 @@ const loadPersistedModelFile = async (file, silent = false) => {
   let success = false;
   let returnedPath = "";
   try {
+    console.log(`[loadPersistedModelFile] 调用 onSwitchModel，文件类型: ${fileType}`);
     store.modelApi.objLabelMap = objLabelMap;
     const { load, filePath } = await store.modelApi.onSwitchModel(model);
     returnedPath = filePath;
+    console.log(`[loadPersistedModelFile] onSwitchModel 返回:`, { load, filePath });
     if (load) {
       success = true;
       store.setActiveEditModelType("oneModel");
       $bus.emit(UPDATE_MODEL);
+      console.log(`[loadPersistedModelFile] 模型加载成功`);
+    } else {
+      console.error(`[loadPersistedModelFile] onSwitchModel 返回 load=false`);
     }
   } catch (err) {
-    console.error("加载模型失败", err);
+    console.error(`[loadPersistedModelFile] 加载模型异常:`, err);
+    if (err && err.stack) {
+      console.error(`[loadPersistedModelFile] 错误堆栈:`, err.stack);
+    }
   } finally {
     if (!silent) $bus.emit(PAGE_LOADING, false);
     if (returnedPath) {
@@ -226,8 +252,9 @@ const loadPersistedModelFile = async (file, silent = false) => {
     }
   }
 
-  if (!success && !silent) {
-    ElMessage.error("模型渲染失败，请重试");
+  if (!success) {
+    console.error(`[loadPersistedModelFile] 最终返回 false，文件: ${file.name}`);
+    if (!silent) ElMessage.error("模型渲染失败，请重试");
   }
   return success;
 };
@@ -396,13 +423,15 @@ const handleBatchDelete = async () => {
 
 const handleBatchTagging = async ({ concurrency, viewKeys }) => {
   // 1. 从服务器获取当前页的raw文件列表
-  const fileListRef = document.querySelector('.file-list')?.__vueParentComponent?.exposed;
-  const currentPage = fileListRef?.currentPage || 1;
-  const pageSize = fileListRef?.pageSize || 10;
-  const fileType = fileListRef?.fileType || 'raw';
+  // 使用 unref 解包可能为 Ref 的属性
+  const currentPageVal = unref(fileListRef.value?.currentPage) || 1;
+  const pageSizeVal = unref(fileListRef.value?.pageSize) || 10;
+  const fileTypeVal = unref(fileListRef.value?.fileType) || 'raw';
+  
+  let response; // 将 response 提升到函数作用域
   
   try {
-    const response = await getServerFileList(fileType, currentPage, pageSize);
+    response = await getServerFileList(fileTypeVal, currentPageVal, pageSizeVal);
     const rawFiles = response.files || [];
     
     if (!rawFiles.length) {
@@ -411,27 +440,53 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
     }
 
     // 2. 下载当前批次文件到IndexedDB
+    console.log(`[批量打标] 开始下载文件:`, rawFiles.map(f => ({ id: f.id, name: f.name })));
     ElMessage.info(`正在加载 ${rawFiles.length} 个文件到工作区...`);
-    await Promise.all(
+    
+    const downloadResults = await Promise.allSettled(
       rawFiles.map(file => 
         downloadModelFromServer(file.id, {
           ...file,
           isTemporary: true,
           serverFileId: file.id,
-          batchNumber: currentPage
+          batchNumber: currentPageVal
+        }).catch(err => {
+          console.error(`[批量打标] 文件 ${file.name} 下载失败:`, err);
+          throw err;
         })
       )
     );
     
+    // 检查下载结果
+    const failedDownloads = downloadResults.filter(r => r.status === 'rejected');
+    if (failedDownloads.length > 0) {
+      console.error(`[批量打标] ${failedDownloads.length} 个文件下载失败`);
+      failedDownloads.forEach((result, idx) => {
+        console.error(`[批量打标] 失败文件 ${idx + 1}:`, result.reason);
+      });
+    }
+    console.log(`[批量打标] 下载完成，成功: ${downloadResults.filter(r => r.status === 'fulfilled').length}/${rawFiles.length}`);
+    
     // 3. 立即预加载下一页（如果存在）
-    const currentBatchNumber = currentPage;
-    if (response.total > currentPage * pageSize) {
-      preloadNextBatch(currentPage + 1, pageSize);
+    const currentBatchNumber = currentPageVal;
+    if (response.total > currentPageVal * pageSizeVal) {
+      preloadNextBatch(currentPageVal + 1, pageSizeVal);
     }
 
     // 4. 更新fileStore，使用IndexedDB中的文件
+    console.log(`[批量打标] 从 IndexedDB 读取文件，批次号: ${currentPageVal}`);
     const workspaceFiles = await getAllFiles();
-    const batchFiles = workspaceFiles.filter(f => f.batchNumber === currentPage);
+    console.log(`[批量打标] IndexedDB 中总文件数: ${workspaceFiles.length}`);
+    console.log(`[批量打标] IndexedDB 文件列表:`, workspaceFiles.map(f => ({ 
+      id: f.id, 
+      name: f.name, 
+      batchNumber: f.batchNumber,
+      hasBlob: !!f.fileBlob 
+    })));
+    
+    const batchFiles = workspaceFiles.filter(f => f.batchNumber === currentPageVal);
+    console.log(`[批量打标] 当前批次文件数: ${batchFiles.length}`);
+    console.log(`[批量打标] 批次文件:`, batchFiles.map(f => ({ id: f.id, name: f.name })));
     fileStore.setFiles(batchFiles);
     
   } catch (error) {
@@ -478,6 +533,18 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
   batchStartTime.value = Date.now();
   remainingTime.value = "计算中...";
 
+  console.log(`[批量打标] ========== 开始批量打标 ==========`);
+  console.log(`[批量打标] 文件数量: ${untaggedFiles.length}`);
+  console.log(`[批量打标] 并发数: ${concurrency}`);
+  console.log(`[批量打标] 截图视角: ${viewKeys.join(', ')}`);
+  console.log(`[批量打标] API配置:`, {
+    baseUrl: vlmConfig.apiConfig.baseUrl,
+    modelName: vlmConfig.apiConfig.modelName || "qwen3-vl-235b-a22b-instruct"
+  });
+  console.log(`[批量打标] editPanel 存在:`, !!editPanel.value);
+  console.log(`[批量打标] captureMaterialWithViews 存在:`, !!editPanel.value?.captureMaterialWithViews);
+  console.log(`[批量打标] writeAutoTags 存在:`, !!editPanel.value?.writeAutoTags);
+
   ElMessage.success(`找到 ${untaggedFiles.length} 个未打标文件，开始处理...`);
   
   vlmClient.init({
@@ -489,8 +556,12 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
   // 场景锁，保证同一时间只有一个模型在加载/截图/GLB写入
   const sceneLock = {
     locked: false,
-    async acquire() {
+    async acquire(timeout = 30000) {
+      const startTime = Date.now();
       while (this.locked) {
+        if (Date.now() - startTime > timeout) {
+          throw new Error(`场景锁获取超时 (${timeout}ms)`);
+        }
         await new Promise(resolve => setTimeout(resolve, 100));
       }
       this.locked = true;
@@ -504,6 +575,7 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
   const activeWorkers = Array(concurrency).fill(null);
 
   const processFile = async (file) => {
+    console.log(`[批量打标] 开始处理文件: ${file.name}`);
     try {
       file.status = 'processing';
       
@@ -512,32 +584,63 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
       let materialNames = [];
       let targetMaterialNames = [];
       
+      console.log(`[批量打标] 等待获取场景锁...`);
       await sceneLock.acquire();
+      console.log(`[批量打标] 已获取场景锁，开始加载模型`);
+      
       try {
         fileStore.setSelectedFile(file.id);
         const loaded = await loadPersistedModelFile(file, true); // silent load
         if (!loaded) throw new Error("加载模型失败");
         
+        console.log(`[批量打标] 模型加载成功，等待渲染稳定...`);
         // 等待渲染稳定
         await new Promise(resolve => setTimeout(resolve, 500));
         
         // 获取材质列表
         const materials = store.modelApi?.modelMaterialList || [];
+        console.log(`[批量打标] 找到 ${materials.length} 个材质`);
         if (!materials.length) throw new Error("未找到材质");
         
+        // 检查 editPanel 是否存在
+        if (!editPanel.value) {
+          throw new Error("editPanel 未初始化");
+        }
+        if (!editPanel.value.captureMaterialWithViews) {
+          throw new Error("captureMaterialWithViews 方法不存在");
+        }
+        
         // 使用用户选择的视角截图
+        console.log(`[批量打标] 开始截图，视角: ${viewKeys.join(', ')}`);
         for (const mesh of materials) {
+           console.log(`[批量打标] 正在为材质 ${mesh.name || mesh.uuid} 截图...`);
            const imgs = await editPanel.value.captureMaterialWithViews(mesh, viewKeys);
-           if (imgs.length) {
+           
+           // 防御性检查
+           if (!imgs) {
+             console.warn(`[批量打标] captureMaterialWithViews 返回 null/undefined`);
+             continue;
+           }
+           if (!Array.isArray(imgs)) {
+             console.warn(`[批量打标] captureMaterialWithViews 返回非数组: ${typeof imgs}`);
+             continue;
+           }
+           
+           if (imgs.length > 0) {
+             console.log(`[批量打标] 材质 ${mesh.name || mesh.uuid} 截图成功，共 ${imgs.length} 张`);
              images.push(imgs);
              materialNames.push(mesh.name || mesh.uuid);
              targetMaterialNames.push(mesh.material?.name);
+           } else {
+             console.warn(`[批量打标] 材质 ${mesh.name || mesh.uuid} 截图为空`);
            }
         }
       } finally {
         sceneLock.release();
+        console.log(`[批量打标] 已释放场景锁`);
       }
       
+      console.log(`[批量打标] 截图完成，共 ${images.length} 组图片`);
       if (!images.length) throw new Error("截图失败");
 
       // 2. 发送 VLM 请求 (并行)
@@ -564,6 +667,7 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
         }
       };
       
+      console.log(`[批量打标] 准备 VLM 请求，共 ${images.length} 个材质`);
       const requests = images.map(imgs => [selectPrompt(), imgs, {}]);
       
       // 这里的 generateBatch 是针对一个文件的多个材质
@@ -571,7 +675,9 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
       // 但这里我们是文件级别的并发。
       // 为了简化，我们对单文件内的材质请求也进行并发
       
+      console.log(`[批量打标] 开始调用 VLM API...`);
       const results = await vlmClient.generateBatch(requests, 4); // 单文件内最大4并发
+      console.log(`[批量打标] VLM API 调用完成，收到 ${results.length} 个结果`);
       
       const batchResults = results.map((res, idx) => ({
         ...res,
@@ -581,62 +687,82 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
 
       // 3. 写入标签
       const isGlb = /\.(glb|gltf)$/i.test(file.name);
+      console.log(`[批量打标] 文件类型: ${isGlb ? 'GLB/GLTF' : 'OBJ'}`);
       
       if (isGlb) {
         // GLB 需要重新加载场景来写入 (互斥)
+        console.log(`[批量打标] 等待获取场景锁以写入标签...`);
         await sceneLock.acquire();
+        console.log(`[批量打标] 已获取场景锁，开始写入标签`);
         try {
            // 再次加载确保是当前文件
+           console.log(`[批量打标] 重新加载模型...`);
            await loadPersistedModelFile(file, true);
+           
+           console.log(`[批量打标] 调用 writeAutoTags...`);
            await editPanel.value.writeAutoTags(file.id, batchResults);
            
            // 4. 导出并上传到服务器labeled_files
+           console.log(`[批量打标] 导出 GLB 文件...`);
            const modelBlob = await store.modelApi.exportSceneToGlbBlob();
            
+           console.log(`[批量打标] 上传到服务器 labeled_files...`);
            await moveToLabeled(file.serverFileId || file.id, modelBlob, {
              name: file.name,
-             labels: batchResults,
+             // labels: batchResults, // 不写入json文件
              hasLabels: true,
              size: modelBlob.size,
              updatedAt: new Date().toISOString()
            });
            
            // 5. 从IndexedDB删除临时文件
+           console.log(`[批量打标] 删除 IndexedDB 临时文件...`);
            await deleteModelFile(file.id);
            
         } finally {
            sceneLock.release();
+           console.log(`[批量打标] 已释放场景锁`);
         }
       } else {
         // OBJ 可以直接写入 Blob (无需场景)
+        console.log(`[批量打标] 调用 writeAutoTags (OBJ)...`);
         await editPanel.value.writeAutoTags(file.id, batchResults);
         
         // 对于非GLB文件，也需要上传到服务器
         // 获取更新后的文件
+        console.log(`[批量打标] 获取更新后的文件...`);
         const updatedFile = await getModelFile(file.id);
         if (updatedFile && updatedFile.fileBlob) {
+          console.log(`[批量打标] 上传到服务器 labeled_files...`);
           await moveToLabeled(file.serverFileId || file.id, updatedFile.fileBlob, {
             name: file.name,
-            labels: batchResults,
+            // labels: batchResults, // 不写入json文件
             hasLabels: true,
             size: updatedFile.fileBlob.size,
             updatedAt: new Date().toISOString()
           });
           
+          console.log(`[批量打标] 删除 IndexedDB 临时文件...`);
           await deleteModelFile(file.id);
         }
       }
 
+      console.log(`[批量打标] 文件 ${file.name} 处理完成`);
       file.status = 'done';
       fileStore.addOrUpdateFile({ ...file, status: 'done', hasLabels: true });
       
     } catch (error) {
-      console.error(`文件 ${file.name} 处理失败`, error);
+      console.error(`[批量打标] ❌ 文件 ${file.name} 处理失败:`, error);
+      if (error && error.stack) {
+        console.error(`[批量打标] 错误堆栈:`, error.stack);
+      }
+      ElMessage.error(`文件 ${file.name} 处理失败: ${error?.message || error || '未知错误'}`);
       file.status = 'error';
       fileStore.addOrUpdateFile({ ...file, status: 'error' });
     } finally {
       processedCount.value++;
       updateProgress();
+      console.log(`[批量打标] 进度: ${processedCount.value}/${totalCount.value}`);
     }
   };
 
@@ -665,16 +791,17 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
   await Promise.all(activeWorkers.map(() => runWorker()));
 
   // 批次完成后，清理IndexedDB
-  await clearBatchFiles(currentBatchNumber);
+  console.log(`[批量打标] 清理批次 ${currentPageVal} 的临时文件...`);
+  await clearBatchFiles(currentPageVal);
   
   isBatchProcessing.value = false;
-  ElMessage.success(`批次 ${currentBatchNumber} 打标完成`);
+  ElMessage.success(`批次 ${currentPageVal} 打标完成`);
   
   // 如果还有下一页，询问用户是否继续
-  if (response.total > currentPage * pageSize) {
+  if (response && response.total > currentPageVal * pageSizeVal) {
     try {
       await ElMessageBox.confirm(
-        `当前批次已完成，还有 ${response.total - currentPage * pageSize} 个文件待处理。是否继续下一批次？`,
+        `当前批次已完成，还有 ${(response?.total || 0) - currentPageVal * pageSizeVal} 个文件待处理。是否继续下一批次？`,
         '提示',
         {
           confirmButtonText: '继续',
@@ -684,10 +811,9 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
       );
       
       // 继续下一批次
-      const fileListComp = document.querySelector('.file-list')?.__vueParentComponent;
-      if (fileListComp && fileListComp.exposed) {
-        fileListComp.exposed.currentPage++;
-        await fileListComp.exposed.loadFileList();
+      if (fileListRef.value) {
+        fileListRef.value.currentPage++;
+        await fileListRef.value.loadFileList();
       }
       
       // 递归调用，处理下一批次
