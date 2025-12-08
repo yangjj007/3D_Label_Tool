@@ -41,7 +41,12 @@ const sanitizeRecord = (metadata, fileBlob) => {
     labels: metadata.labels || [],
     hasLabels: metadata.hasLabels || false,
     updatedAt: metadata.updatedAt || new Date().toISOString(),
-    fileBlob: fileBlob || metadata.fileBlob || null
+    fileBlob: fileBlob || metadata.fileBlob || null,
+    // 新增字段用于服务器集成
+    isTemporary: metadata.isTemporary ?? true, // 是否为临时文件
+    serverFileId: metadata.serverFileId || null, // 服务器文件ID
+    batchNumber: metadata.batchNumber || null, // 批次号
+    isFromServer: metadata.isFromServer ?? false // 是否来自服务器
   };
   return record;
 };
@@ -196,6 +201,106 @@ export const clearModelFiles = async (folder = STORAGE_FOLDER) => {
     });
   } catch (error) {
     console.warn("清空 IndexedDB 模型文件失败", error);
+  }
+};
+
+/**
+ * 清除所有临时文件
+ */
+export const clearTemporaryFiles = async () => {
+  if (!isIndexedDBSupported) {
+    return;
+  }
+  try {
+    const db = await openDatabase();
+    let count = 0;
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, "readwrite");
+      const store = tx.objectStore(STORE_NAME);
+      const request = store.openCursor();
+      request.onsuccess = event => {
+        const cursor = event.target.result;
+        if (!cursor) {
+          return;
+        }
+        if (cursor.value.isTemporary === true) {
+          cursor.delete();
+          count++;
+        }
+        cursor.continue();
+      };
+      request.onerror = () => reject(request.error);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    console.log(`清除了 ${count} 个临时文件`);
+    return count;
+  } catch (error) {
+    console.warn("清除临时文件失败", error);
+    return 0;
+  }
+};
+
+/**
+ * 清除指定批次的文件
+ * @param {number} batchNumber - 批次号
+ */
+export const clearBatchFiles = async (batchNumber) => {
+  if (!isIndexedDBSupported) {
+    return;
+  }
+  try {
+    const db = await openDatabase();
+    let count = 0;
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, "readwrite");
+      const store = tx.objectStore(STORE_NAME);
+      const request = store.openCursor();
+      request.onsuccess = event => {
+        const cursor = event.target.result;
+        if (!cursor) {
+          return;
+        }
+        if (cursor.value.batchNumber === batchNumber) {
+          cursor.delete();
+          count++;
+        }
+        cursor.continue();
+      };
+      request.onerror = () => reject(request.error);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    console.log(`清除了批次 ${batchNumber} 的 ${count} 个文件`);
+    return count;
+  } catch (error) {
+    console.warn(`清除批次 ${batchNumber} 文件失败`, error);
+    return 0;
+  }
+};
+
+/**
+ * 获取所有文件（不限文件夹）
+ */
+export const getAllFiles = async () => {
+  if (!isIndexedDBSupported) {
+    return loadFallbackFiles();
+  }
+  try {
+    const db = await openDatabase();
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, "readonly");
+      const store = tx.objectStore(STORE_NAME);
+      const request = store.getAll();
+      request.onsuccess = () => {
+        const files = request.result.map(stripBlob);
+        resolve(files);
+      };
+      request.onerror = () => reject(request.error);
+    });
+  } catch (error) {
+    console.warn("读取所有文件失败", error);
+    return loadFallbackFiles();
   }
 };
 

@@ -114,7 +114,8 @@ import PageLoading from "@/components/Loading/PageLoading.vue";
 import { MODEL_PREVIEW_CONFIG, MODEL_BASE_DATA, MODEL_DEFAULT_CONFIG, UPDATE_MODEL, PAGE_LOADING } from "@/config/constant";
 import { useMeshEditStore } from "@/store/meshEditStore";
 import { useFileStore } from "@/store/fileStore";
-import { deleteModelFile, listFolderFiles, getModelFile, clearModelFiles, STORAGE_FOLDER } from "@/utils/filePersistence";
+import { deleteModelFile, listFolderFiles, getModelFile, clearModelFiles, STORAGE_FOLDER, getAllFiles } from "@/utils/filePersistence";
+import { getServerFileList, downloadModelFromServer, moveToLabeled, clearBatchFiles, deleteServerFile } from "@/utils/serverApi";
 import * as THREE from "three";
 
 import MultiImageVLM from "@/utils/vlmService";
@@ -239,7 +240,7 @@ const handleSelectFile = async file => {
 
 const handleDeleteFile = async file => {
   try {
-    await ElMessageBox.confirm(`确认删除“${file.name}”？`, "提示", {
+    await ElMessageBox.confirm(`确认删除"${file.name}"？`, "提示", {
       confirmButtonText: "删除",
       cancelButtonText: "取消",
       type: "warning"
@@ -247,13 +248,36 @@ const handleDeleteFile = async file => {
   } catch (err) {
     return;
   }
+  
   try {
-    await deleteModelFile(file.id);
+    // 如果文件来自服务器（从文件列表组件），先删除服务器文件
+    if (file.isFromServer || file.serverFileId) {
+      try {
+        await deleteServerFile(file.serverFileId || file.id || file.name);
+        console.log('服务器文件已删除:', file.name);
+      } catch (serverErr) {
+        console.error('删除服务器文件失败:', serverErr);
+        // 继续删除本地文件
+      }
+    }
+    
+    // 删除IndexedDB中的文件（如果存在）
+    try {
+      await deleteModelFile(file.id);
+    } catch (dbErr) {
+      // IndexedDB中可能不存在，忽略错误
+      console.log('IndexedDB中不存在该文件:', file.id);
+    }
+    
+    fileStore.removeFile(file.id);
+    ElMessage.success("删除成功");
+    
+    // 触发文件列表刷新
+    $bus.emit('REFRESH_FILE_LIST');
   } catch (err) {
-    console.error("删除本地模型失败", err);
+    console.error("删除文件失败", err);
+    ElMessage.error("删除失败：" + err.message);
   }
-  fileStore.removeFile(file.id);
-  ElMessage.success("删除成功");
 };
 
 const handleRenameFile = file => {
@@ -371,6 +395,50 @@ const handleBatchDelete = async () => {
 };
 
 const handleBatchTagging = async ({ concurrency, viewKeys }) => {
+  // 1. 从服务器获取当前页的raw文件列表
+  const fileListRef = document.querySelector('.file-list')?.__vueParentComponent?.exposed;
+  const currentPage = fileListRef?.currentPage || 1;
+  const pageSize = fileListRef?.pageSize || 10;
+  const fileType = fileListRef?.fileType || 'raw';
+  
+  try {
+    const response = await getServerFileList(fileType, currentPage, pageSize);
+    const rawFiles = response.files || [];
+    
+    if (!rawFiles.length) {
+      ElMessage.info("当前页没有未打标文件");
+      return;
+    }
+
+    // 2. 下载当前批次文件到IndexedDB
+    ElMessage.info(`正在加载 ${rawFiles.length} 个文件到工作区...`);
+    await Promise.all(
+      rawFiles.map(file => 
+        downloadModelFromServer(file.id, {
+          ...file,
+          isTemporary: true,
+          serverFileId: file.id,
+          batchNumber: currentPage
+        })
+      )
+    );
+    
+    // 3. 立即预加载下一页（如果存在）
+    const currentBatchNumber = currentPage;
+    if (response.total > currentPage * pageSize) {
+      preloadNextBatch(currentPage + 1, pageSize);
+    }
+
+    // 4. 更新fileStore，使用IndexedDB中的文件
+    const workspaceFiles = await getAllFiles();
+    const batchFiles = workspaceFiles.filter(f => f.batchNumber === currentPage);
+    fileStore.setFiles(batchFiles);
+    
+  } catch (error) {
+    ElMessage.error(`加载文件失败: ${error.message}`);
+    return;
+  }
+
   if (!fileStore.files.length) {
     ElMessage.warning("没有文件可处理");
     return;
@@ -521,16 +589,45 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
            // 再次加载确保是当前文件
            await loadPersistedModelFile(file, true);
            await editPanel.value.writeAutoTags(file.id, batchResults);
+           
+           // 4. 导出并上传到服务器labeled_files
+           const modelBlob = await store.modelApi.exportSceneToGlbBlob();
+           
+           await moveToLabeled(file.serverFileId || file.id, modelBlob, {
+             name: file.name,
+             labels: batchResults,
+             hasLabels: true,
+             size: modelBlob.size,
+             updatedAt: new Date().toISOString()
+           });
+           
+           // 5. 从IndexedDB删除临时文件
+           await deleteModelFile(file.id);
+           
         } finally {
            sceneLock.release();
         }
       } else {
         // OBJ 可以直接写入 Blob (无需场景)
         await editPanel.value.writeAutoTags(file.id, batchResults);
+        
+        // 对于非GLB文件，也需要上传到服务器
+        // 获取更新后的文件
+        const updatedFile = await getModelFile(file.id);
+        if (updatedFile && updatedFile.fileBlob) {
+          await moveToLabeled(file.serverFileId || file.id, updatedFile.fileBlob, {
+            name: file.name,
+            labels: batchResults,
+            hasLabels: true,
+            size: updatedFile.fileBlob.size,
+            updatedAt: new Date().toISOString()
+          });
+          
+          await deleteModelFile(file.id);
+        }
       }
 
-      file.status = 'done'; // 实际上 fileStore 是响应式的，这里修改可能不持久化，但 loadPersistedFiles 会重置
-      // 应该更新 store 中的状态，并标记已打标
+      file.status = 'done';
       fileStore.addOrUpdateFile({ ...file, status: 'done', hasLabels: true });
       
     } catch (error) {
@@ -567,11 +664,73 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
 
   await Promise.all(activeWorkers.map(() => runWorker()));
 
+  // 批次完成后，清理IndexedDB
+  await clearBatchFiles(currentBatchNumber);
+  
   isBatchProcessing.value = false;
-  ElMessage.success("批量打标完成");
+  ElMessage.success(`批次 ${currentBatchNumber} 打标完成`);
+  
+  // 如果还有下一页，询问用户是否继续
+  if (response.total > currentPage * pageSize) {
+    try {
+      await ElMessageBox.confirm(
+        `当前批次已完成，还有 ${response.total - currentPage * pageSize} 个文件待处理。是否继续下一批次？`,
+        '提示',
+        {
+          confirmButtonText: '继续',
+          cancelButtonText: '停止',
+          type: 'info'
+        }
+      );
+      
+      // 继续下一批次
+      const fileListComp = document.querySelector('.file-list')?.__vueParentComponent;
+      if (fileListComp && fileListComp.exposed) {
+        fileListComp.exposed.currentPage++;
+        await fileListComp.exposed.loadFileList();
+      }
+      
+      // 递归调用，处理下一批次
+      await handleBatchTagging({ concurrency, viewKeys });
+    } catch {
+      ElMessage.info('批量打标已停止');
+    }
+  } else {
+    ElMessage.success('所有文件打标完成！');
+  }
   
   // 刷新文件列表状态（如果需要）
   await loadPersistedFiles();
+};
+
+// 预加载下一批次
+const isPreloadingNextBatch = ref(false);
+const preloadNextBatch = async (batchNumber, pageSize) => {
+  if (isPreloadingNextBatch.value) return;
+  
+  isPreloadingNextBatch.value = true;
+  
+  try {
+    const response = await getServerFileList('raw', batchNumber, pageSize);
+    if (response.files && response.files.length > 0) {
+      console.log(`开始预加载批次 ${batchNumber}，共 ${response.files.length} 个文件`);
+      await Promise.all(
+        response.files.map(file =>
+          downloadModelFromServer(file.id, {
+            ...file,
+            isTemporary: true,
+            serverFileId: file.id,
+            batchNumber: batchNumber
+          })
+        )
+      );
+      console.log(`批次 ${batchNumber} 预加载完成`);
+    }
+  } catch (error) {
+    console.error('预加载失败:', error);
+  } finally {
+    isPreloadingNextBatch.value = false;
+  }
 };
 
 const loadPersistedFiles = async () => {

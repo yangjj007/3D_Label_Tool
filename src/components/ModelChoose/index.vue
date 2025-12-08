@@ -184,6 +184,7 @@ import { useMeshEditStore } from "@/store/meshEditStore";
 import { useFileStore } from "@/store/fileStore";
 import { getFileType, getAssetsFile } from "@/utils/utilityFunction.js";
 import { saveModelFile, STORAGE_FOLDER } from "@/utils/filePersistence";
+import { uploadModelToServer } from "@/utils/serverApi";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { UPDATE_MODEL, PAGE_LOADING } from "@/config/constant";
 
@@ -352,6 +353,9 @@ const onUpload = async file => {
     type: getFileType(file.name)
   });
   await processLocalFile(file.raw, fileId);
+  
+  // 单个上传完成后，通知文件列表刷新
+  $bus.emit('REFRESH_FILE_LIST');
 };
 
 const handleBatchFiles = async event => {
@@ -368,6 +372,10 @@ const handleBatchFiles = async event => {
       });
       await processLocalFile(rawFile, fileId, { renderModel: false, suppressGlobalLoading: true });
     }
+    
+    // 上传完成后，通知文件列表刷新
+    $bus.emit('REFRESH_FILE_LIST');
+    ElMessage.success(`成功上传 ${files.length} 个文件`);
   } finally {
     batchUploading.value = false;
     $bus.emit(PAGE_LOADING, false);
@@ -377,18 +385,27 @@ const handleBatchFiles = async event => {
 
 const persistUploadedFile = async (fileId, rawFile) => {
   try {
-    await saveModelFile(
+    // 上传到服务器
+    await uploadModelToServer(
+      rawFile,
       {
         id: fileId,
         name: rawFile.name,
         size: rawFile.size,
-        type: getFileType(rawFile.name),
-        folder: STORAGE_FOLDER
+        type: getFileType(rawFile.name)
       },
-      rawFile
+      (progress) => {
+        // 更新上传进度（如果需要）
+        const uploadProgress = Math.floor(progress.overall * 30); // 分配30%进度给上传
+        fileStore.setFileProgress(fileId, 70 + uploadProgress);
+      }
     );
+    
+    // 上传成功后，暂不保存到IndexedDB（由FileList组件按需下载）
+    console.log(`文件 ${rawFile.name} 已上传到服务器`);
   } catch (err) {
-    console.error("保存本地模型文件失败", err);
+    console.error("上传模型文件到服务器失败", err);
+    ElMessage.error(`上传失败: ${err.message}`);
   }
 };
 

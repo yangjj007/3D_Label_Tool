@@ -1,0 +1,470 @@
+const express = require('express');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+const cors = require('cors');
+
+const app = express();
+const PORT = process.env.PORT || 3001;
+
+// 配置中间件
+app.use(cors());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+// 配置存储目录
+const FILES_DIR = path.join(__dirname, '../files');
+const RAW_FILES_DIR = path.join(FILES_DIR, 'raw_files');
+const LABELED_FILES_DIR = path.join(FILES_DIR, 'labeled_files');
+const TEMP_CHUNKS_DIR = path.join(__dirname, '../temp-chunks');
+
+// 确保目录存在
+[FILES_DIR, RAW_FILES_DIR, LABELED_FILES_DIR, TEMP_CHUNKS_DIR].forEach(dir => {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+});
+
+// 分块上传配置 - 使用内存存储，然后手动写入文件
+const uploadChunk = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 100 * 1024 * 1024 } // 每块最大100MB
+});
+
+// 获取文件列表（分页）
+app.get('/api/files', (req, res) => {
+  try {
+    const { type = 'all', page = 1, pageSize = 10 } = req.query;
+    
+    let targetDir;
+    if (type === 'raw') {
+      targetDir = RAW_FILES_DIR;
+    } else if (type === 'labeled') {
+      targetDir = LABELED_FILES_DIR;
+    } else {
+      // 合并两个目录的文件
+      const rawFiles = getFilesFromDirectory(RAW_FILES_DIR, 'raw');
+      const labeledFiles = getFilesFromDirectory(LABELED_FILES_DIR, 'labeled');
+      const allFiles = [...rawFiles, ...labeledFiles];
+      
+      return sendPaginatedResponse(allFiles, page, pageSize, res);
+    }
+    
+    const files = getFilesFromDirectory(targetDir, type);
+    sendPaginatedResponse(files, page, pageSize, res);
+    
+  } catch (error) {
+    console.error('获取文件列表失败:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 辅助函数：从目录获取文件列表
+function getFilesFromDirectory(dir, type) {
+  const files = [];
+  
+  if (!fs.existsSync(dir)) {
+    return files;
+  }
+  
+  const fileNames = fs.readdirSync(dir).filter(name => !name.endsWith('.json'));
+  
+  for (const fileName of fileNames) {
+    const filePath = path.join(dir, fileName);
+    const stats = fs.statSync(filePath);
+    const metadataPath = `${filePath}.json`;
+    
+    let metadata = {
+      name: fileName,
+      size: stats.size,
+      createdAt: stats.birthtime,
+      updatedAt: stats.mtime
+    };
+    
+    // 读取元数据
+    if (fs.existsSync(metadataPath)) {
+      try {
+        const metaContent = fs.readFileSync(metadataPath, 'utf8');
+        const savedMeta = JSON.parse(metaContent);
+        metadata = { ...metadata, ...savedMeta };
+      } catch (err) {
+        console.warn(`读取元数据失败: ${metadataPath}`, err);
+      }
+    }
+    
+    files.push({
+      id: fileName,
+      name: fileName,
+      size: stats.size,
+      type: type || 'unknown',
+      status: metadata.hasLabels ? 'labeled' : 'raw',
+      createdAt: stats.birthtime,
+      updatedAt: metadata.updatedAt || stats.mtime,
+      labels: metadata.labels || [],
+      hasLabels: metadata.hasLabels || false,
+      isFromServer: true,  // 标记为来自服务器
+      serverFileId: fileName  // 服务器文件ID
+    });
+  }
+  
+  // 按创建时间降序排序
+  files.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  
+  return files;
+}
+
+// 辅助函数：发送分页响应
+function sendPaginatedResponse(files, page, pageSize, res) {
+  const pageNum = parseInt(page);
+  const pageSizeNum = parseInt(pageSize);
+  const total = files.length;
+  const start = (pageNum - 1) * pageSizeNum;
+  const end = start + pageSizeNum;
+  const paginatedFiles = files.slice(start, end);
+  
+  res.json({
+    success: true,
+    total,
+    page: pageNum,
+    pageSize: pageSizeNum,
+    totalPages: Math.ceil(total / pageSizeNum),
+    files: paginatedFiles
+  });
+}
+
+// 上传文件块
+app.post('/api/upload-chunk', uploadChunk.single('chunk'), (req, res) => {
+  try {
+    const { fileId, chunkIndex, totalChunks } = req.body;
+    
+    if (!req.file) {
+      return res.status(400).json({ error: '没有接收到文件块' });
+    }
+    
+    if (!fileId) {
+      return res.status(400).json({ error: 'fileId参数缺失' });
+    }
+    
+    // 创建临时块目录
+    const chunkDir = path.join(TEMP_CHUNKS_DIR, fileId);
+    if (!fs.existsSync(chunkDir)) {
+      fs.mkdirSync(chunkDir, { recursive: true });
+    }
+    
+    // 将内存中的文件写入磁盘
+    const chunkPath = path.join(chunkDir, `chunk-${chunkIndex}`);
+    fs.writeFileSync(chunkPath, req.file.buffer);
+    
+    res.json({
+      success: true,
+      message: `块 ${parseInt(chunkIndex) + 1}/${totalChunks} 上传成功`,
+      chunkIndex: parseInt(chunkIndex)
+    });
+  } catch (error) {
+    console.error('上传块失败:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 检查已上传的块
+app.post('/api/check-chunks', (req, res) => {
+  try {
+    const { fileId, totalChunks } = req.body;
+    const chunkDir = path.join(TEMP_CHUNKS_DIR, fileId);
+    
+    const uploadedChunks = [];
+    if (fs.existsSync(chunkDir)) {
+      for (let i = 0; i < totalChunks; i++) {
+        if (fs.existsSync(path.join(chunkDir, `chunk-${i}`))) {
+          uploadedChunks.push(i);
+        }
+      }
+    }
+    
+    res.json({
+      success: true,
+      uploadedChunks,
+      shouldResume: uploadedChunks.length > 0
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 合并文件块
+app.post('/api/merge-chunks', async (req, res) => {
+  try {
+    const { fileId, filename, totalChunks, metadata = {} } = req.body;
+    
+    const chunkDir = path.join(TEMP_CHUNKS_DIR, fileId);
+    const finalPath = path.join(RAW_FILES_DIR, filename);
+    
+    // 创建写入流
+    const writeStream = fs.createWriteStream(finalPath);
+    
+    // 按顺序合并所有块
+    for (let i = 0; i < totalChunks; i++) {
+      const chunkPath = path.join(chunkDir, `chunk-${i}`);
+      if (!fs.existsSync(chunkPath)) {
+        throw new Error(`缺少块 ${i}`);
+      }
+      const chunkBuffer = fs.readFileSync(chunkPath);
+      writeStream.write(chunkBuffer);
+    }
+    
+    writeStream.end();
+    
+    await new Promise((resolve, reject) => {
+      writeStream.on('finish', resolve);
+      writeStream.on('error', reject);
+    });
+    
+    // 清理临时块文件
+    fs.rmSync(chunkDir, { recursive: true, force: true });
+    
+    // 保存元数据
+    const fileStats = fs.statSync(finalPath);
+    const metadataToSave = {
+      ...metadata,
+      filename,
+      size: fileStats.size,
+      uploadTime: new Date().toISOString(),
+      fileId
+    };
+    
+    const metadataPath = finalPath + '.json';
+    fs.writeFileSync(metadataPath, JSON.stringify(metadataToSave, null, 2));
+    
+    res.json({
+      success: true,
+      message: '文件合并成功',
+      filename,
+      size: fileStats.size,
+      path: finalPath
+    });
+    
+  } catch (error) {
+    console.error('合并块失败:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 下载文件（支持分块下载）
+app.get('/api/download/:fileId', (req, res) => {
+  try {
+    const { fileId } = req.params;
+    
+    // 尝试在raw和labeled目录中查找文件
+    let filePath = path.join(RAW_FILES_DIR, fileId);
+    if (!fs.existsSync(filePath)) {
+      filePath = path.join(LABELED_FILES_DIR, fileId);
+    }
+    
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: '文件不存在' });
+    }
+    
+    const stats = fs.statSync(filePath);
+    const fileSize = stats.size;
+    const range = req.headers.range;
+    
+    if (range) {
+      // 支持分块下载
+      const parts = range.replace(/bytes=/, '').split('-');
+      const start = parseInt(parts[0], 10);
+      const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+      const chunkSize = (end - start) + 1;
+      
+      const fileStream = fs.createReadStream(filePath, { start, end });
+      
+      res.writeHead(206, {
+        'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+        'Accept-Ranges': 'bytes',
+        'Content-Length': chunkSize,
+        'Content-Type': 'application/octet-stream'
+      });
+      
+      fileStream.pipe(res);
+    } else {
+      // 完整下载
+      res.writeHead(200, {
+        'Content-Length': fileSize,
+        'Content-Type': 'application/octet-stream',
+        'Content-Disposition': `attachment; filename="${fileId}"`
+      });
+      
+      const fileStream = fs.createReadStream(filePath);
+      fileStream.pipe(res);
+    }
+    
+  } catch (error) {
+    console.error('下载文件失败:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 批量下载文件信息
+app.post('/api/batch-download', (req, res) => {
+  try {
+    const { fileIds } = req.body;
+    
+    if (!Array.isArray(fileIds)) {
+      return res.status(400).json({ error: 'fileIds必须是数组' });
+    }
+    
+    const filesInfo = fileIds.map(fileId => {
+      let filePath = path.join(RAW_FILES_DIR, fileId);
+      let type = 'raw';
+      
+      if (!fs.existsSync(filePath)) {
+        filePath = path.join(LABELED_FILES_DIR, fileId);
+        type = 'labeled';
+      }
+      
+      if (!fs.existsSync(filePath)) {
+        return { id: fileId, error: '文件不存在' };
+      }
+      
+      const stats = fs.statSync(filePath);
+      
+      return {
+        id: fileId,
+        name: fileId,
+        size: stats.size,
+        type,
+        downloadUrl: `/api/download/${fileId}`
+      };
+    });
+    
+    res.json({
+      success: true,
+      files: filesInfo
+    });
+    
+  } catch (error) {
+    console.error('批量下载信息获取失败:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 移动到已打标
+app.post('/api/move-to-labeled', uploadChunk.single('file'), async (req, res) => {
+  try {
+    const { fileId, metadata: metadataStr } = req.body;
+    const metadata = metadataStr ? JSON.parse(metadataStr) : {};
+    
+    const rawPath = path.join(RAW_FILES_DIR, fileId);
+    const labeledPath = path.join(LABELED_FILES_DIR, fileId);
+    
+    if (req.file) {
+      // 如果上传了新文件（已打标的版本），使用新文件
+      fs.writeFileSync(labeledPath, req.file.buffer);
+    } else if (fs.existsSync(rawPath)) {
+      // 否则移动原文件
+      fs.renameSync(rawPath, labeledPath);
+      
+      // 移动元数据文件
+      const rawMetaPath = rawPath + '.json';
+      const labeledMetaPath = labeledPath + '.json';
+      if (fs.existsSync(rawMetaPath)) {
+        fs.renameSync(rawMetaPath, labeledMetaPath);
+      }
+    } else {
+      return res.status(404).json({ error: '源文件不存在' });
+    }
+    
+    // 更新元数据
+    const metadataPath = labeledPath + '.json';
+    const updatedMetadata = {
+      ...metadata,
+      filename: fileId,
+      hasLabels: true,
+      movedAt: new Date().toISOString()
+    };
+    fs.writeFileSync(metadataPath, JSON.stringify(updatedMetadata, null, 2));
+    
+    res.json({
+      success: true,
+      message: '文件已移动到已打标目录',
+      filename: fileId
+    });
+    
+  } catch (error) {
+    console.error('移动文件失败:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 删除文件
+app.delete('/api/files/:fileId', (req, res) => {
+  try {
+    const { fileId } = req.params;
+    
+    // 尝试在两个目录中删除
+    let deleted = false;
+    
+    for (const dir of [RAW_FILES_DIR, LABELED_FILES_DIR]) {
+      const filePath = path.join(dir, fileId);
+      const metadataPath = filePath + '.json';
+      
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+        deleted = true;
+      }
+      
+      if (fs.existsSync(metadataPath)) {
+        fs.unlinkSync(metadataPath);
+      }
+    }
+    
+    if (!deleted) {
+      return res.status(404).json({ error: '文件不存在' });
+    }
+    
+    res.json({
+      success: true,
+      message: '文件删除成功'
+    });
+    
+  } catch (error) {
+    console.error('删除文件失败:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 取消上传
+app.post('/api/cancel-upload', (req, res) => {
+  try {
+    const { fileId } = req.body;
+    const chunkDir = path.join(TEMP_CHUNKS_DIR, fileId);
+    
+    if (fs.existsSync(chunkDir)) {
+      fs.rmSync(chunkDir, { recursive: true, force: true });
+    }
+    
+    res.json({ success: true, message: '上传已取消' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 健康检查
+app.get('/api/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    directories: {
+      rawFiles: fs.existsSync(RAW_FILES_DIR),
+      labeledFiles: fs.existsSync(LABELED_FILES_DIR),
+      tempChunks: fs.existsSync(TEMP_CHUNKS_DIR)
+    }
+  });
+});
+
+app.listen(PORT, () => {
+  console.log(`🚀 服务器运行在 http://localhost:${PORT}`);
+  console.log(`📁 原始文件目录: ${RAW_FILES_DIR}`);
+  console.log(`📁 已打标文件目录: ${LABELED_FILES_DIR}`);
+  console.log(`📁 临时块目录: ${TEMP_CHUNKS_DIR}`);
+});
+

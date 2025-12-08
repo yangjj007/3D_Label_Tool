@@ -8,8 +8,13 @@ yarn
 
 
 # local env files
+.env
 .env.local
 .env.*.local
+
+# 模型文件存储目录
+files/
+temp-chunks/
 
 # Log files
 npm-debug.log*
