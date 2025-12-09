@@ -105,10 +105,6 @@
                 <el-tag :type="getLabelStatusType(file)" size="small">
                   {{ getLabelStatusText(file) }}
                 </el-tag>
-                <!-- 如果在IndexedDB中，显示"工作区"标记 -->
-                <el-tag v-if="file.isInWorkspace" size="small" type="success">
-                  工作区
-                </el-tag>
               </div>
               <el-progress
                 v-if="file.progress != null && file.progress > 0 && file.progress < 100"
@@ -132,13 +128,6 @@
             </div>
 
             <div class="file-actions">
-              <el-button 
-                size="small" 
-                :type="file.isInWorkspace ? 'primary' : 'default'" 
-                @click.stop="handleSelectFile(file)"
-              >
-                {{ file.isInWorkspace ? '打开' : '加载' }}
-              </el-button>
               <el-button size="small" type="danger" icon="Delete" @click.stop="emitDeleteFile(file)" />
             </div>
           </div>
@@ -271,24 +260,17 @@ function handlePageSizeChange(size) {
   loadFileList();
 }
 
-// 选择文件
-function onSelectFile(file) {
+// 选择文件（合并加载逻辑）
+async function onSelectFile(file) {
   // 根据当前fileType，为文件添加hasLabels标记
   const fileWithLabels = {
     ...file,
     hasLabels: fileType.value === 'labeled' || file.hasLabels,
     isFromServer: true
   };
-  emit("select", fileWithLabels);
-}
-
-// 处理文件选择（加载到工作区或打开）
-async function handleSelectFile(file) {
-  if (file.isInWorkspace) {
-    // 已在工作区，直接打开
-    emit("select", file);
-  } else {
-    // 不在工作区，需要加载
+  
+  // 如果文件不在工作区，需要先加载
+  if (!file.isInWorkspace) {
     try {
       const loadingInstance = ElLoading.service({
         lock: true,
@@ -312,13 +294,14 @@ async function handleSelectFile(file) {
       // 刷新工作区文件列表
       workspaceFiles.value = await getAllFiles();
       
-      // 加载完成后打开
-      emit("select", file);
-      
     } catch (error) {
       ElMessage.error('加载失败: ' + error.message);
+      return;
     }
   }
+  
+  // 打开文件
+  emit("select", fileWithLabels);
 }
 
 // 批量打标相关
