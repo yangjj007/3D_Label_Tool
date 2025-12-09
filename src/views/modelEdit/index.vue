@@ -8,8 +8,6 @@
       </div>
       <div class="header-lr">
         <el-space>
-          <el-button type="primary" icon="Film" @click="$router.push({ path: '/modelBase' })"> 模型库 </el-button>
-          <el-button type="primary" icon="Document" v-if="handleConfigBtn" @click="onSaveConfig">保存数据</el-button>
           <el-button type="primary" icon="View" v-if="handleConfigBtn" @click="onPreview">效果预览</el-button>
           <el-dropdown trigger="click">
             <el-button type="primary" icon="Download"> 下载/导出<el-icon class="el-icon--right"></el-icon> </el-button>
@@ -22,7 +20,6 @@
               </el-dropdown-menu>
             </template>
           </el-dropdown>
-          <el-button type="primary" icon="HelpFilled" v-if="handleConfigBtn" @click="onImportantCode"> 嵌入代码 </el-button>
           <el-button type="primary" icon="FullScreen" @click="onFullScreen">
             {{ fullscreenStatus ? "取消全屏" : "全屏" }}
           </el-button>

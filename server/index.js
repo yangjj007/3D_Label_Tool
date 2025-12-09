@@ -478,6 +478,70 @@ app.post('/api/cancel-upload', (req, res) => {
   }
 });
 
+// 提示词库配置文件路径
+const PROMPTS_LIBRARY_PATH = path.join(__dirname, '../prompts-library.json');
+
+// 获取提示词库
+app.get('/api/prompts-library', (req, res) => {
+  try {
+    if (!fs.existsSync(PROMPTS_LIBRARY_PATH)) {
+      return res.status(404).json({ error: '提示词库配置文件不存在' });
+    }
+    
+    const data = fs.readFileSync(PROMPTS_LIBRARY_PATH, 'utf8');
+    const promptsLibrary = JSON.parse(data);
+    
+    res.json({
+      success: true,
+      data: promptsLibrary
+    });
+  } catch (error) {
+    console.error('读取提示词库失败:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 保存提示词库
+app.post('/api/prompts-library', (req, res) => {
+  try {
+    const { prompts, selectionRule, description } = req.body;
+    
+    if (!Array.isArray(prompts)) {
+      return res.status(400).json({ error: 'prompts必须是数组' });
+    }
+    
+    const promptsLibrary = {
+      version: "1.0.0",
+      lastUpdated: new Date().toISOString(),
+      description: description || "VLM提示词库配置文件 - 用于工业设计3D模型分析",
+      selectionRule: selectionRule || "random",
+      prompts: prompts.map(prompt => ({
+        ...prompt,
+        updatedAt: new Date().toISOString()
+      }))
+    };
+    
+    // 写入文件（格式化JSON，便于阅读和版本控制）
+    fs.writeFileSync(
+      PROMPTS_LIBRARY_PATH, 
+      JSON.stringify(promptsLibrary, null, 2),
+      'utf8'
+    );
+    
+    console.log(`✅ 提示词库已保存: ${prompts.length} 个提示词`);
+    
+    res.json({
+      success: true,
+      message: '提示词库保存成功',
+      count: prompts.length,
+      lastUpdated: promptsLibrary.lastUpdated
+    });
+  } catch (error) {
+    console.error('保存提示词库失败:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // 健康检查
 app.get('/api/health', (req, res) => {
   res.json({

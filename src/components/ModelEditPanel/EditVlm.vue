@@ -88,6 +88,26 @@
           </el-radio-group>
         </div>
       </div>
+      <div class="options prompt-actions-row">
+        <el-button 
+          type="success" 
+          size="small" 
+          icon="FolderOpened"
+          @click="loadPromptsFromServer"
+          :loading="loadingPrompts"
+        >
+          从文件加载
+        </el-button>
+        <el-button 
+          type="primary" 
+          size="small" 
+          icon="Document"
+          @click="savePromptsToServer"
+          :loading="savingPrompts"
+        >
+          保存到文件
+        </el-button>
+      </div>
       <div class="options prompt-list">
         <el-scrollbar max-height="200px">
           <div
@@ -139,6 +159,11 @@
           添加提示词
         </el-button>
       </div>
+      
+      <div class="header">
+        <span>截图配置</span>
+      </div>
+      
       <div class="options screenshot-row">
         <el-button type="info" size="small" @click="captureSceneImage" :disabled="!selectedUuid || multiCapturing">
           截图
@@ -402,6 +427,8 @@ const batchResults = ref([]);
 const showResultDialog = ref(false);
 const currentDetailTitle = ref("");
 const currentDetailContent = ref("");
+const savingPrompts = ref(false);
+const loadingPrompts = ref(false);
 
 const openResultDetail = item => {
   currentDetailTitle.value = item.materialName;
@@ -655,9 +682,29 @@ const loadSavedConfig = () => {
   apiConfig.modelName = stored?.modelName || DEFAULT_MODEL_NAME;
 };
 
-onMounted(() => {
+onMounted(async () => {
   apiConfig.modelName = DEFAULT_MODEL_NAME;
   loadSavedConfig();
+  
+  // 先尝试从服务器文件加载提示词
+  try {
+    const response = await fetch('http://localhost:3001/api/prompts-library');
+    if (response.ok) {
+      const result = await response.json();
+      if (result.success && result.data?.prompts?.length > 0) {
+        promptList.value = result.data.prompts;
+        if (result.data.selectionRule) {
+          selectionRule.value = result.data.selectionRule;
+        }
+        console.log('从服务器文件加载提示词成功');
+        return; // 成功加载，直接返回
+      }
+    }
+  } catch (error) {
+    console.log('从服务器文件加载提示词失败，将使用本地存储:', error.message);
+  }
+  
+  // 如果服务器文件加载失败，则从 localStorage 加载
   loadPromptLibrary();
 });
 
@@ -1123,6 +1170,89 @@ const onWriteLabel = async () => {
   await writeAutoTags(fileId);
 };
 
+// 保存提示词到服务器文件
+const savePromptsToServer = async () => {
+  if (promptList.value.length === 0) {
+    ElMessage.warning("提示词库为空，无需保存");
+    return;
+  }
+  
+  savingPrompts.value = true;
+  
+  try {
+    const response = await fetch('http://localhost:3001/api/prompts-library', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        prompts: promptList.value,
+        selectionRule: selectionRule.value,
+        description: "VLM提示词库配置文件 - 用于工业设计3D模型分析"
+      })
+    });
+    
+    if (!response.ok) {
+      throw new Error(`保存失败: ${response.statusText}`);
+    }
+    
+    const result = await response.json();
+    
+    if (result.success) {
+      ElMessage.success(`提示词库已保存到文件 (${result.count} 个提示词)`);
+      console.log('提示词库保存成功:', result);
+    } else {
+      throw new Error(result.error || '保存失败');
+    }
+  } catch (error) {
+    console.error('保存提示词库失败:', error);
+    ElMessage.error(`保存失败: ${error.message}`);
+  } finally {
+    savingPrompts.value = false;
+  }
+};
+
+// 从服务器文件加载提示词
+const loadPromptsFromServer = async () => {
+  loadingPrompts.value = true;
+  
+  try {
+    const response = await fetch('http://localhost:3001/api/prompts-library');
+    
+    if (!response.ok) {
+      throw new Error(`加载失败: ${response.statusText}`);
+    }
+    
+    const result = await response.json();
+    
+    if (result.success && result.data) {
+      const { prompts, selectionRule: rule } = result.data;
+      
+      if (Array.isArray(prompts) && prompts.length > 0) {
+        promptList.value = prompts;
+        if (rule) {
+          selectionRule.value = rule;
+        }
+        
+        // 同时保存到 localStorage
+        savePromptLibrary();
+        
+        ElMessage.success(`已从文件加载 ${prompts.length} 个提示词`);
+        console.log('提示词库加载成功:', result.data);
+      } else {
+        throw new Error('文件中没有有效的提示词数据');
+      }
+    } else {
+      throw new Error(result.error || '加载失败');
+    }
+  } catch (error) {
+    console.error('加载提示词库失败:', error);
+    ElMessage.error(`加载失败: ${error.message}`);
+  } finally {
+    loadingPrompts.value = false;
+  }
+};
+
 defineExpose({ getPanelConfig, captureMaterialWithViews, writeAutoTags });
 </script>
 
@@ -1135,6 +1265,11 @@ defineExpose({ getPanelConfig, captureMaterialWithViews, writeAutoTags });
 }
 .rule-selector {
   margin-left: auto;
+}
+.prompt-actions-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
 }
 .material-list {
   padding: 4px 0;
