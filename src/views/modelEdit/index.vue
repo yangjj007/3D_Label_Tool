@@ -812,6 +812,11 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
   isBatchProcessing.value = false;
   ElMessage.success(`批次 ${currentPageVal} 打标完成`);
   
+  // 批量打标完成后，切换到已打标视图
+  if (fileListRef.value && fileListRef.value.switchToLabeled) {
+    await fileListRef.value.switchToLabeled();
+  }
+  
   // 如果还有下一页，询问用户是否继续
   if (response && response.total > currentPageVal * pageSizeVal) {
     try {

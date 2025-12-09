@@ -21,7 +21,14 @@
             @change="handlePageSizeChange"
           />
           
-          <el-button size="small" type="primary" @click="triggerBatchUpload">批量上传</el-button>
+          <el-button 
+            size="small" 
+            type="primary" 
+            @click="triggerBatchUpload"
+            :disabled="fileType === 'labeled'"
+          >
+            批量上传
+          </el-button>
           <el-button 
             size="small"
             type="warning" 
@@ -413,12 +420,20 @@ onUnmounted(() => {
   }
 });
 
+// 切换到已打标视图
+const switchToLabeled = async () => {
+  fileType.value = 'labeled';
+  currentPage.value = 1;
+  await loadFileList();
+};
+
 // 暴露方法给父组件
 defineExpose({
   currentPage,
   pageSize,
   fileType,
   loadFileList,
+  switchToLabeled,
   refreshWorkspaceStatus: async () => {
     workspaceFiles.value = await getAllFiles();
   }
