@@ -504,7 +504,7 @@ app.get('/api/prompts-library', (req, res) => {
 // 保存提示词库
 app.post('/api/prompts-library', (req, res) => {
   try {
-    const { prompts, selectionRule, description } = req.body;
+    const { prompts, selectionRule, description, ignoreKeywords } = req.body;
     
     if (!Array.isArray(prompts)) {
       return res.status(400).json({ error: 'prompts必须是数组' });
@@ -515,6 +515,7 @@ app.post('/api/prompts-library', (req, res) => {
       lastUpdated: new Date().toISOString(),
       description: description || "VLM提示词库配置文件 - 用于工业设计3D模型分析",
       selectionRule: selectionRule || "random",
+      ignoreKeywords: Array.isArray(ignoreKeywords) ? ignoreKeywords : ['Unknown Object'],
       prompts: prompts.map(prompt => ({
         ...prompt,
         updatedAt: new Date().toISOString()
@@ -528,12 +529,14 @@ app.post('/api/prompts-library', (req, res) => {
       'utf8'
     );
     
-    console.log(`✅ 提示词库已保存: ${prompts.length} 个提示词`);
+    const keywordCount = promptsLibrary.ignoreKeywords.length;
+    console.log(`✅ 提示词库已保存: ${prompts.length} 个提示词, ${keywordCount} 个过滤关键词`);
     
     res.json({
       success: true,
       message: '提示词库保存成功',
       count: prompts.length,
+      keywordCount: keywordCount,
       lastUpdated: promptsLibrary.lastUpdated
     });
   } catch (error) {

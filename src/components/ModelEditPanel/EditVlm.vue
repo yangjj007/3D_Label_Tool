@@ -107,6 +107,14 @@
         >
           保存到文件
         </el-button>
+        <el-button 
+          type="warning" 
+          size="small" 
+          icon="Filter"
+          @click="showFilterDialog = true"
+        >
+          过滤设置
+        </el-button>
       </div>
       <div class="options prompt-list">
         <el-scrollbar max-height="200px">
@@ -309,6 +317,57 @@
         </span>
       </template>
     </el-dialog>
+
+    <el-dialog
+      v-model="showFilterDialog"
+      title="标签过滤设置"
+      width="500px"
+      append-to-body
+      custom-class="filter-edit-dialog"
+    >
+      <div class="filter-dialog-content">
+        <div class="filter-hint-box">
+          <el-icon><InfoFilled /></el-icon>
+          <span>添加需要忽略的关键词，VLM返回包含这些词的标签将被自动跳过（不区分大小写）</span>
+        </div>
+        
+        <div class="filter-list">
+          <div
+            v-for="(keyword, index) in ignoreKeywords"
+            :key="index"
+            class="filter-item"
+          >
+            <el-input
+              v-model="ignoreKeywords[index]"
+              size="small"
+              placeholder="输入关键词，如: Unknown Object"
+            />
+            <el-button
+              type="danger"
+              size="small"
+              icon="Delete"
+              @click="removeKeyword(index)"
+              :disabled="ignoreKeywords.length === 1"
+            />
+          </div>
+        </div>
+        
+        <el-button
+          type="primary"
+          size="small"
+          icon="Plus"
+          @click="addKeyword"
+          style="width: 100%; margin-top: 10px;"
+        >
+          添加关键词
+        </el-button>
+      </div>
+      <template #footer>
+        <span class="dialog-footer">
+          <el-button @click="showFilterDialog = false">关闭</el-button>
+        </span>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -346,10 +405,17 @@ const saveApiToStorage = () => {
 };
 
 const savePromptLibrary = () => {
+  // 过滤掉空关键词
+  const filteredKeywords = ignoreKeywords.value
+    .map(k => k?.trim())
+    .filter(k => k && k.length > 0);
+  
   const payload = {
     prompts: promptList.value,
-    selectionRule: selectionRule.value
+    selectionRule: selectionRule.value,
+    ignoreKeywords: filteredKeywords.length > 0 ? filteredKeywords : ['Unknown Object']
   };
+  console.log('[savePromptLibrary] 保存到localStorage:', payload);
   $local.set(PROMPT_STORAGE_KEY, payload);
 };
 
@@ -360,6 +426,9 @@ const loadPromptLibrary = () => {
   }
   if (stored?.selectionRule) {
     selectionRule.value = stored.selectionRule;
+  }
+  if (Array.isArray(stored?.ignoreKeywords) && stored.ignoreKeywords.length > 0) {
+    ignoreKeywords.value = stored.ignoreKeywords;
   }
 };
 
@@ -429,6 +498,20 @@ const currentDetailTitle = ref("");
 const currentDetailContent = ref("");
 const savingPrompts = ref(false);
 const loadingPrompts = ref(false);
+const showFilterDialog = ref(false);
+const ignoreKeywords = ref(['Unknown Object']);
+
+// 添加关键词
+const addKeyword = () => {
+  ignoreKeywords.value.push('');
+};
+
+// 删除关键词
+const removeKeyword = (index) => {
+  if (ignoreKeywords.value.length > 1) {
+    ignoreKeywords.value.splice(index, 1);
+  }
+};
 
 const openResultDetail = item => {
   currentDetailTitle.value = item.materialName;
@@ -696,6 +779,10 @@ onMounted(async () => {
         if (result.data.selectionRule) {
           selectionRule.value = result.data.selectionRule;
         }
+        // 加载过滤关键词
+        if (Array.isArray(result.data.ignoreKeywords) && result.data.ignoreKeywords.length > 0) {
+          ignoreKeywords.value = result.data.ignoreKeywords;
+        }
         console.log('从服务器文件加载提示词成功');
         return; // 成功加载，直接返回
       }
@@ -953,11 +1040,38 @@ const getPanelConfig = () => ({
   promptList: promptList.value,
   selectionRule: selectionRule.value,
   conversationText: conversationText.value,
-  testMessage: testMessage.value
+  testMessage: testMessage.value,
+  ignoreKeywords: ignoreKeywords.value
 });
 
 const escapeRegExp = string => {
   return string.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+};
+
+// 检查文本是否包含忽略关键词
+const shouldIgnoreLabel = (text) => {
+  if (!text || !Array.isArray(ignoreKeywords.value) || ignoreKeywords.value.length === 0) return false;
+  
+  // 过滤掉空关键词
+  const keywords = ignoreKeywords.value
+    .map(k => k?.trim())
+    .filter(k => k && k.length > 0);
+  
+  if (keywords.length === 0) return false;
+  
+  // 对每个关键词创建正则表达式（不区分大小写，处理多余空格）
+  for (const keyword of keywords) {
+    // 将关键词中的空格转换为\s+以匹配任意空白字符
+    const pattern = keyword.replace(/\s+/g, '\\s+');
+    const regex = new RegExp(pattern, 'i');
+    
+    if (regex.test(text)) {
+      console.log(`[shouldIgnoreLabel] 标签包含忽略关键词 "${keyword}": ${text.substring(0, 50)}...`);
+      return true;
+    }
+  }
+  
+  return false;
 };
 
 const writeAutoTags = async (fileId, batchResultsData) => {
@@ -1034,7 +1148,20 @@ const writeAutoTags = async (fileId, batchResultsData) => {
       return applyLabelToMesh(mesh, label);
     };
 
-    const validBatchResults = hasBatch ? results.filter(res => !res.error && res.text) : [];
+    const validBatchResults = hasBatch 
+      ? results.filter(res => {
+          // 排除错误结果
+          if (res.error || !res.text) return false;
+          
+          // 排除包含忽略关键词的结果
+          if (shouldIgnoreLabel(res.text)) {
+            console.log(`[writeAutoTags] 跳过包含忽略关键词的标签 - 材质: ${res.materialName}`);
+            return false;
+          }
+          
+          return true;
+        })
+      : [];
 
     if (isObjFile) {
       let content = await fileRecord.fileBlob.text();
@@ -1081,10 +1208,24 @@ const writeAutoTags = async (fileId, batchResultsData) => {
           ElMessage.warning("请先选择一个材质以确定写入目标");
           return;
         }
+        
+        const labelText = conversationText.value.trim();
+        
+        // 添加关键词检查
+        if (shouldIgnoreLabel(labelText)) {
+          ElMessage.warning("当前标签内容包含忽略关键词，已取消写入");
+          return;
+        }
+        
+        if (!labelText) {
+          ElMessage.warning("当前对话内容为空，无法写入标签");
+          return;
+        }
+        
         const mesh = store.modelApi?.model?.getObjectByProperty("uuid", selectedUuid.value);
         if (mesh && mesh.material) {
-          if (updateLabelInContent(mesh.material.name, conversationText.value)) {
-            applyLabelToMesh(mesh, conversationText.value);
+          if (updateLabelInContent(mesh.material.name, labelText)) {
+            applyLabelToMesh(mesh, labelText);
             updatedCount++;
           }
         } else {
@@ -1129,6 +1270,13 @@ const writeAutoTags = async (fileId, batchResultsData) => {
           return;
         }
         const labelText = conversationText.value.trim();
+        
+        // 添加关键词检查
+        if (shouldIgnoreLabel(labelText)) {
+          ElMessage.warning("当前标签内容包含忽略关键词，已取消写入");
+          return;
+        }
+        
         if (!labelText) {
           ElMessage.warning("当前对话内容为空，无法写入标签");
           return;
@@ -1180,6 +1328,17 @@ const savePromptsToServer = async () => {
   savingPrompts.value = true;
   
   try {
+    // 过滤掉空关键词
+    const filteredKeywords = ignoreKeywords.value
+      .map(k => k?.trim())
+      .filter(k => k && k.length > 0);
+    
+    console.log('[savePromptsToServer] 准备保存的数据:', {
+      promptCount: promptList.value.length,
+      selectionRule: selectionRule.value,
+      ignoreKeywords: filteredKeywords
+    });
+    
     const response = await fetch('http://localhost:3001/api/prompts-library', {
       method: 'POST',
       headers: {
@@ -1188,6 +1347,7 @@ const savePromptsToServer = async () => {
       body: JSON.stringify({
         prompts: promptList.value,
         selectionRule: selectionRule.value,
+        ignoreKeywords: filteredKeywords,
         description: "VLM提示词库配置文件 - 用于工业设计3D模型分析"
       })
     });
@@ -1199,7 +1359,8 @@ const savePromptsToServer = async () => {
     const result = await response.json();
     
     if (result.success) {
-      ElMessage.success(`提示词库已保存到文件 (${result.count} 个提示词)`);
+      const keywordCount = filteredKeywords.length;
+      ElMessage.success(`提示词库已保存到文件 (${result.count} 个提示词, ${keywordCount} 个过滤关键词)`);
       console.log('提示词库保存成功:', result);
     } else {
       throw new Error(result.error || '保存失败');
@@ -1226,7 +1387,10 @@ const loadPromptsFromServer = async () => {
     const result = await response.json();
     
     if (result.success && result.data) {
-      const { prompts, selectionRule: rule } = result.data;
+      const { prompts, selectionRule: rule, ignoreKeywords: keywords } = result.data;
+      
+      console.log('[loadPromptsFromServer] 从服务器文件接收到的数据:', result.data);
+      console.log('[loadPromptsFromServer] ignoreKeywords 数据:', keywords);
       
       if (Array.isArray(prompts) && prompts.length > 0) {
         promptList.value = prompts;
@@ -1234,11 +1398,22 @@ const loadPromptsFromServer = async () => {
           selectionRule.value = rule;
         }
         
+        // 加载过滤关键词
+        if (Array.isArray(keywords) && keywords.length > 0) {
+          ignoreKeywords.value = keywords;
+          console.log('[loadPromptsFromServer] 成功加载过滤关键词:', keywords);
+        } else {
+          // 如果文件中没有关键词，使用默认值
+          ignoreKeywords.value = ['Unknown Object'];
+          console.log('[loadPromptsFromServer] 文件中无关键词，使用默认值');
+        }
+        
         // 同时保存到 localStorage
         savePromptLibrary();
         
-        ElMessage.success(`已从文件加载 ${prompts.length} 个提示词`);
-        console.log('提示词库加载成功:', result.data);
+        const keywordCount = ignoreKeywords.value.length;
+        ElMessage.success(`已从文件加载 ${prompts.length} 个提示词, ${keywordCount} 个过滤关键词`);
+        console.log('[loadPromptsFromServer] 提示词库加载成功');
       } else {
         throw new Error('文件中没有有效的提示词数据');
       }
@@ -1522,6 +1697,51 @@ defineExpose({ getPanelConfig, captureMaterialWithViews, writeAutoTags });
 }
 :deep(.vlm-result-dialog .detail-content) {
   color: #fff;
+}
+
+.filter-dialog-content {
+  padding: 10px 0;
+}
+
+.filter-hint-box {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 12px;
+  background-color: #f0f9ff;
+  border-radius: 6px;
+  border-left: 3px solid #409eff;
+  margin-bottom: 16px;
+  font-size: 13px;
+  color: #606266;
+  line-height: 1.5;
+}
+
+.filter-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.filter-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.filter-item .el-input {
+  flex: 1;
+}
+
+:deep(.filter-edit-dialog) {
+  background: #fff;
+}
+
+:deep(.filter-edit-dialog .el-dialog__title) {
+  font-size: 16px;
+  font-weight: 600;
 }
 </style>
 
