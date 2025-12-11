@@ -699,6 +699,36 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
         targetMaterialName: targetMaterialNames[idx]
       }));
 
+      // 检查VLM生成结果的有效性
+      const successCount = batchResults.filter(res => !res.error && res.text).length;
+      const totalCount = batchResults.length;
+      const failureCount = totalCount - successCount;
+      
+      console.log(`[批量打标] VLM结果统计: 成功 ${successCount}/${totalCount}, 失败 ${failureCount}`);
+      
+      // 如果全部失败，跳过该文件
+      if (successCount === 0) {
+        console.warn(`[批量打标] ⚠️ 文件 ${file.name} 所有材质标签生成失败，跳过处理`);
+        ElMessage.warning(`文件 ${file.name} 所有材质标签生成失败，已跳过`);
+        
+        // 清理IndexedDB中的临时文件
+        console.log(`[批量打标] 删除 IndexedDB 临时文件...`);
+        await deleteModelFile(file.id);
+        
+        // 标记为跳过状态
+        file.status = 'skipped';
+        fileStore.addOrUpdateFile({ ...file, status: 'skipped' });
+        
+        // 直接返回，不进行后续处理
+        return;
+      }
+      
+      // 如果部分失败，记录警告但继续处理
+      if (failureCount > 0) {
+        console.warn(`[批量打标] ⚠️ 文件 ${file.name} 有 ${failureCount} 个材质标签生成失败，仍继续处理成功的 ${successCount} 个`);
+        ElMessage.warning(`文件 ${file.name}: ${failureCount} 个材质失败，${successCount} 个成功`);
+      }
+
       // 3. 写入标签
       const isGlb = /\.(glb|gltf)$/i.test(file.name);
       console.log(`[批量打标] 文件类型: ${isGlb ? 'GLB/GLTF' : 'OBJ'}`);
