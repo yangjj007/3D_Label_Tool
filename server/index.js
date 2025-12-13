@@ -558,8 +558,8 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-app.listen(PORT, () => {
-  console.log(`🚀 服务器运行在 http://localhost:${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 服务器运行在 http://0.0.0.0:${PORT}`);
   console.log(`📁 原始文件目录: ${RAW_FILES_DIR}`);
   console.log(`📁 已打标文件目录: ${LABELED_FILES_DIR}`);
   console.log(`📁 临时块目录: ${TEMP_CHUNKS_DIR}`);

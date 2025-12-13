@@ -380,6 +380,7 @@ import MultiImageVLM from "@/utils/vlmService";
 import { ElMessage } from "element-plus";
 import { CAMERA_VIEW_PRESETS } from "@/utils/modelEditClass/helperModules";
 
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:30005/api';
 const store = useMeshEditStore();
 const fileStore = useFileStore();
 const vlmClient = new MultiImageVLM();
@@ -771,7 +772,7 @@ onMounted(async () => {
   
   // 先尝试从服务器文件加载提示词
   try {
-    const response = await fetch('http://localhost:30005/api/prompts-library');
+    const response = await fetch(`${API_BASE_URL}/prompts-library`, {
     if (response.ok) {
       const result = await response.json();
       if (result.success && result.data?.prompts?.length > 0) {
@@ -1378,7 +1379,7 @@ const loadPromptsFromServer = async () => {
   loadingPrompts.value = true;
   
   try {
-    const response = await fetch('http://localhost:30005/api/prompts-library');
+    const response = await fetch(`${API_BASE_URL}/prompts-library`);
     
     if (!response.ok) {
       throw new Error(`加载失败: ${response.statusText}`);

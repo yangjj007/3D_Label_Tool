@@ -28,6 +28,24 @@ pnpm run dev:full
 npx pnpm run dev:full -y
 ```
 
+### ⚙️ 环境变量配置
+
+首次使用需要配置环境变量：
+
+```bash
+# 复制 .env.example 为 .env（如果还没有的话）
+cp .env.example .env
+
+# 根据实际情况修改 .env 文件中的配置
+# VITE_API_BASE_URL - 后端 API 地址（默认：http://localhost:30005/api）
+# VITE_CHUNK_SIZE - 分块传输大小（默认：10MB）
+```
+
+**主要配置项：**
+- `VITE_API_BASE_URL`: 后端服务地址，开发环境默认 `http://localhost:30005/api`
+- `VITE_CHUNK_SIZE`: 大文件分块上传/下载的块大小，默认 10MB
+- `VITE_APP_BASE_URL`: 应用部署的基础路径，默认 `/`
+
 ### 🎨 预览
 
 - 1.注意:部分模型文件较大,首次加载需要等待较长时间
