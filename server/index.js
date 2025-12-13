@@ -369,29 +369,20 @@ app.post('/api/move-to-labeled', uploadChunk.single('file'), async (req, res) =>
       // 如果上传了新文件（已打标的版本），使用新文件
       fs.writeFileSync(labeledPath, req.file.buffer);
       console.log(`[move-to-labeled] 新文件已写入 labeled_files: ${labeledPath}, 大小: ${req.file.size} bytes`);
+      console.log(`[move-to-labeled] raw_files 中的原文件已保留: ${rawPath}`);
       
-      // 删除raw目录中的旧文件（如果存在）
-      if (fs.existsSync(rawPath)) {
-        fs.unlinkSync(rawPath);
-        console.log(`[move-to-labeled] 已删除 raw_files 中的旧文件: ${rawPath}`);
-        
-        // 删除旧的元数据文件
-        const rawMetaPath = rawPath + '.json';
-        if (fs.existsSync(rawMetaPath)) {
-          fs.unlinkSync(rawMetaPath);
-          console.log(`[move-to-labeled] 已删除 raw_files 中的旧元数据: ${rawMetaPath}`);
-        }
-      }
+      // 不再删除raw目录中的旧文件，保留原始文件
     } else if (fs.existsSync(rawPath)) {
-      // 否则移动原文件
-      fs.renameSync(rawPath, labeledPath);
-      console.log(`[move-to-labeled] 原文件已移动到 labeled_files: ${labeledPath}`);
+      // 否则复制原文件（而不是移动）
+      fs.copyFileSync(rawPath, labeledPath);
+      console.log(`[move-to-labeled] 原文件已复制到 labeled_files: ${labeledPath}`);
+      console.log(`[move-to-labeled] raw_files 中的原文件已保留: ${rawPath}`);
       
-      // 移动元数据文件
+      // 复制元数据文件
       const rawMetaPath = rawPath + '.json';
       const labeledMetaPath = labeledPath + '.json';
       if (fs.existsSync(rawMetaPath)) {
-        fs.renameSync(rawMetaPath, labeledMetaPath);
+        fs.copyFileSync(rawMetaPath, labeledMetaPath);
       }
     } else {
       console.error(`[move-to-labeled] 错误: 源文件不存在 - ${rawPath}`);
