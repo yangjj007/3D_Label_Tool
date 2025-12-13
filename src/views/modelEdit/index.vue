@@ -550,8 +550,33 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
   }
 
   if (!untaggedFiles.length) {
-    ElMessage.info("所有文件都已打标，无需处理");
-    return;
+    // 当前页所有文件都已打标，检查是否还有下一页
+    const totalPages = Math.ceil(response.total / pageSizeVal);
+    const hasNextPage = currentPageVal < totalPages;
+    
+    console.log(`[批量打标] 当前页所有文件都已打标，当前页: ${currentPageVal}/${totalPages}`);
+    
+    if (hasNextPage) {
+      // 有下一页，自动跳转到下一页继续处理
+      const remainingFiles = response.total - currentPageVal * pageSizeVal;
+      ElMessage.info(`当前页已完成，自动跳转到第 ${currentPageVal + 1} 页继续处理剩余 ${remainingFiles} 个文件...`);
+      console.log(`[批量打标] 自动跳转到第 ${currentPageVal + 1} 页`);
+      
+      // 更新文件列表组件的当前页码并刷新列表
+      if (fileListRef.value) {
+        fileListRef.value.currentPage = currentPageVal + 1;
+        await fileListRef.value.loadFileList();
+      }
+      
+      // 递归调用处理下一页
+      await handleBatchTagging({ concurrency, viewKeys });
+      return;
+    } else {
+      // 没有下一页了，所有文件都已打标完成
+      ElMessage.success("🎉 所有文件都已打标完成！");
+      console.log(`[批量打标] 所有文件都已打标完成`);
+      return;
+    }
   }
 
   const config = editPanel.value?.getPanelConfig();
