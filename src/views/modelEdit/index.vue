@@ -441,7 +441,8 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
   // 使用 unref 解包可能为 Ref 的属性
   const currentPageVal = unref(fileListRef.value?.currentPage) || 1;
   const pageSizeVal = unref(fileListRef.value?.pageSize) || 10;
-  const fileTypeVal = unref(fileListRef.value?.fileType) || 'raw';
+  // 强制使用 raw 类型，确保始终处理未打标文件
+  const fileTypeVal = 'raw';
   
   let response; // 将 response 提升到函数作用域
   let labeledFilesSet = new Set(); // 存储已打标文件名
@@ -497,6 +498,8 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
         
         // 更新文件列表组件的当前页码并刷新列表
         if (fileListRef.value) {
+          // 确保保持在raw(未打标)列表
+          fileListRef.value.fileType = 'raw';
           fileListRef.value.currentPage = currentPageVal + 1;
           await fileListRef.value.loadFileList();
         }
@@ -508,6 +511,11 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
         // 没有下一页了，所有文件都已打标完成
         ElMessage.success("🎉 所有文件都已打标完成！");
         console.log(`[批量打标] 所有文件都已打标完成`);
+        
+        // 所有文件完成后切换到已打标视图
+        if (fileListRef.value && fileListRef.value.switchToLabeled) {
+          await fileListRef.value.switchToLabeled();
+        }
         return;
       }
     }
@@ -604,6 +612,8 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
       
       // 更新文件列表组件的当前页码并刷新列表
       if (fileListRef.value) {
+        // 确保保持在raw(未打标)列表
+        fileListRef.value.fileType = 'raw';
         fileListRef.value.currentPage = currentPageVal + 1;
         await fileListRef.value.loadFileList();
       }
@@ -616,6 +626,11 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
       // 没有下一页了，所有文件都已打标完成
       ElMessage.success("🎉 所有文件都已打标完成！");
       console.log(`[批量打标] 所有文件都已打标完成`);
+      
+      // 所有文件完成后切换到已打标视图
+      if (fileListRef.value && fileListRef.value.switchToLabeled) {
+        await fileListRef.value.switchToLabeled();
+      }
       return;
     }
   }
@@ -902,26 +917,29 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
   isBatchProcessing.value = false;
   ElMessage.success(`批次 ${currentPageVal} 打标完成`);
   
-  // 批量打标完成后，切换到已打标视图
-  if (fileListRef.value && fileListRef.value.switchToLabeled) {
-    await fileListRef.value.switchToLabeled();
-  }
-  
   // 如果还有下一页，自动继续处理下一批次
   if (response && response.total > currentPageVal * pageSizeVal) {
     const remainingFiles = (response?.total || 0) - currentPageVal * pageSizeVal;
     ElMessage.info(`当前批次已完成，继续处理剩余 ${remainingFiles} 个文件...`);
     
-    // 继续下一批次
+    // 继续下一批次 - 保持在raw(未打标)列表
     if (fileListRef.value) {
-      fileListRef.value.currentPage++;
+      // 确保fileType保持为raw
+      fileListRef.value.fileType = 'raw';
+      fileListRef.value.currentPage = currentPageVal + 1;
       await fileListRef.value.loadFileList();
     }
     
     // 递归调用，处理下一批次
     await handleBatchTagging({ concurrency, viewKeys });
   } else {
-    ElMessage.success('所有文件打标完成！');
+    // 所有批次都完成后，提示用户并切换到已打标视图
+    ElMessage.success('🎉 所有文件打标完成！');
+    
+    // 所有批次完成后才切换到已打标视图
+    if (fileListRef.value && fileListRef.value.switchToLabeled) {
+      await fileListRef.value.switchToLabeled();
+    }
   }
   
   // 刷新文件列表状态（如果需要）
