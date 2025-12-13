@@ -23,6 +23,9 @@
 
  pnpm install / pnpm serve / pnpm build(pnpm build:pro)
 
+
+pnpm run dev:full
+npx pnpm run dev:full
 ```
 
 ### 🎨 预览

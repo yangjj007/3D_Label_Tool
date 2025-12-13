@@ -847,30 +847,19 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
     await fileListRef.value.switchToLabeled();
   }
   
-  // 如果还有下一页，询问用户是否继续
+  // 如果还有下一页，自动继续处理下一批次
   if (response && response.total > currentPageVal * pageSizeVal) {
-    try {
-      await ElMessageBox.confirm(
-        `当前批次已完成，还有 ${(response?.total || 0) - currentPageVal * pageSizeVal} 个文件待处理。是否继续下一批次？`,
-        '提示',
-        {
-          confirmButtonText: '继续',
-          cancelButtonText: '停止',
-          type: 'info'
-        }
-      );
-      
-      // 继续下一批次
-      if (fileListRef.value) {
-        fileListRef.value.currentPage++;
-        await fileListRef.value.loadFileList();
-      }
-      
-      // 递归调用，处理下一批次
-      await handleBatchTagging({ concurrency, viewKeys });
-    } catch {
-      ElMessage.info('批量打标已停止');
+    const remainingFiles = (response?.total || 0) - currentPageVal * pageSizeVal;
+    ElMessage.info(`当前批次已完成，继续处理剩余 ${remainingFiles} 个文件...`);
+    
+    // 继续下一批次
+    if (fileListRef.value) {
+      fileListRef.value.currentPage++;
+      await fileListRef.value.loadFileList();
     }
+    
+    // 递归调用，处理下一批次
+    await handleBatchTagging({ concurrency, viewKeys });
   } else {
     ElMessage.success('所有文件打标完成！');
   }
