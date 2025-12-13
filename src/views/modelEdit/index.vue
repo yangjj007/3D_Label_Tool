@@ -443,6 +443,7 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
   const fileTypeVal = unref(fileListRef.value?.fileType) || 'raw';
   
   let response; // 将 response 提升到函数作用域
+  let labeledFilesSet = new Set(); // 存储已打标文件名
   
   try {
     response = await getServerFileList(fileTypeVal, currentPageVal, pageSizeVal);
@@ -453,7 +454,19 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
       return;
     }
 
-    // 2. 下载当前批次文件到IndexedDB
+    // 2. 从服务器获取labeled_files文件夹中的所有文件名（用于断点续传）
+    console.log(`[批量打标] 检查 labeled_files 中已存在的文件...`);
+    try {
+      const labeledResponse = await getServerFileList('labeled', 1, 10000); // 获取大量文件
+      labeledResponse.files.forEach(file => {
+        labeledFilesSet.add(file.name);
+      });
+      console.log(`[批量打标] labeled_files 中已有 ${labeledFilesSet.size} 个文件`);
+    } catch (labeledErr) {
+      console.warn(`[批量打标] 获取 labeled_files 列表失败，将继续处理:`, labeledErr);
+    }
+
+    // 3. 下载当前批次文件到IndexedDB
     console.log(`[批量打标] 开始下载文件:`, rawFiles.map(f => ({ id: f.id, name: f.name })));
     ElMessage.info(`正在加载 ${rawFiles.length} 个文件到工作区...`);
     
@@ -481,13 +494,13 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
     }
     console.log(`[批量打标] 下载完成，成功: ${downloadResults.filter(r => r.status === 'fulfilled').length}/${rawFiles.length}`);
     
-    // 3. 立即预加载下一页（如果存在）
+    // 4. 立即预加载下一页（如果存在）
     const currentBatchNumber = currentPageVal;
     if (response.total > currentPageVal * pageSizeVal) {
       preloadNextBatch(currentPageVal + 1, pageSizeVal);
     }
 
-    // 4. 更新fileStore，使用IndexedDB中的文件
+    // 5. 更新fileStore，使用IndexedDB中的文件
     console.log(`[批量打标] 从 IndexedDB 读取文件，批次号: ${currentPageVal}`);
     const workspaceFiles = await getAllFiles();
     console.log(`[批量打标] IndexedDB 中总文件数: ${workspaceFiles.length}`);
@@ -513,10 +526,28 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
     return;
   }
 
-  // 过滤出未打标的文件
+  // 过滤出未打标的文件（检查本地标记和服务器端labeled_files文件夹）
   const untaggedFiles = fileStore.files.filter(file => {
-    return !file.hasLabels && !(file.labels && file.labels.length > 0);
+    // 如果本地已标记为已打标，跳过
+    if (file.hasLabels || (file.labels && file.labels.length > 0)) {
+      console.log(`[批量打标] 跳过文件 ${file.name}: 本地已标记为已打标`);
+      return false;
+    }
+    
+    // 如果服务器端labeled_files文件夹中已存在同名文件，跳过（断点续传）
+    if (labeledFilesSet.has(file.name)) {
+      console.log(`[批量打标] 跳过文件 ${file.name}: labeled_files中已存在`);
+      return false;
+    }
+    
+    return true;
   });
+
+  const skippedCount = fileStore.files.length - untaggedFiles.length;
+  if (skippedCount > 0) {
+    console.log(`[批量打标] 跳过 ${skippedCount} 个已打标文件`);
+    ElMessage.info(`跳过 ${skippedCount} 个已打标文件`);
+  }
 
   if (!untaggedFiles.length) {
     ElMessage.info("所有文件都已打标，无需处理");
