@@ -117,6 +117,7 @@ import { getServerFileList, downloadModelFromServer, moveToLabeled, clearBatchFi
 import * as THREE from "three";
 
 import MultiImageVLM from "@/utils/vlmService";
+import RenderPool from "@/utils/RenderPool";
 
 const store = useMeshEditStore();
 const fileStore = useFileStore();
@@ -663,98 +664,94 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
     modelName: vlmConfig.apiConfig.modelName || "qwen3-vl-235b-a22b-instruct"
   });
 
-  // 场景锁，保证同一时间只有一个模型在加载/截图/GLB写入
-  const sceneLock = {
-    locked: false,
-    async acquire(timeout = 30000) {
-      const startTime = Date.now();
-      while (this.locked) {
-        if (Date.now() - startTime > timeout) {
-          throw new Error(`场景锁获取超时 (${timeout}ms)`);
-        }
-        await new Promise(resolve => setTimeout(resolve, 100));
-      }
-      this.locked = true;
-    },
-    release() {
-      this.locked = false;
+  // 检查 OffscreenCanvas 支持并初始化渲染池
+  let renderPool = null;
+  const useOffscreenRendering = RenderPool.isSupported();
+  
+  if (useOffscreenRendering) {
+    console.log('[批量打标] ✓ 支持 OffscreenCanvas，使用并行渲染模式');
+    const poolSize = Math.min(concurrency, 10);
+    renderPool = new RenderPool(poolSize);
+    
+    try {
+      await renderPool.initialize();
+      console.log(`[批量打标] 渲染池初始化成功，池大小: ${poolSize}`);
+    } catch (error) {
+      console.error('[批量打标] 渲染池初始化失败，降级到传统模式:', error);
+      renderPool = null;
+      ElMessage.warning('并行渲染初始化失败，将使用传统模式（速度较慢）');
     }
-  };
+  } else {
+    console.log('[批量打标] ✗ 不支持 OffscreenCanvas，使用传统串行模式');
+    ElMessage.info('浏览器不支持高性能并行渲染，将使用传统模式');
+  }
 
   const queue = [...untaggedFiles];
   const activeWorkers = Array(concurrency).fill(null);
 
   const processFile = async (file) => {
     console.log(`[批量打标] 开始处理文件: ${file.name}`);
+    let offscreenRenderer = null;
+    
     try {
       file.status = 'processing';
       
-      // 1. 加载模型并截图 (互斥)
       let images = [];
       let materialNames = [];
       let targetMaterialNames = [];
       
-      console.log(`[批量打标] 等待获取场景锁...`);
-      await sceneLock.acquire();
-      console.log(`[批量打标] 已获取场景锁，开始加载模型`);
-      
-      try {
-        fileStore.setSelectedFile(file.id);
-        const loaded = await loadPersistedModelFile(file, true); // silent load
-        if (!loaded) throw new Error("加载模型失败");
+      // 使用离屏渲染模式
+      if (renderPool) {
+        console.log(`[批量打标] 使用离屏渲染模式处理`);
         
-        console.log(`[批量打标] 模型加载成功，等待渲染稳定...`);
-        // 等待渲染稳定
-        await new Promise(resolve => setTimeout(resolve, 500));
+        // 1. 获取渲染器
+        console.log(`[批量打标] 等待获取离屏渲染器...`);
+        offscreenRenderer = await renderPool.acquire();
+        console.log(`[批量打标] 已获取离屏渲染器`);
         
-        // 获取材质列表
-        const materials = store.modelApi?.modelMaterialList || [];
-        console.log(`[批量打标] 找到 ${materials.length} 个材质`);
-        if (!materials.length) throw new Error("未找到材质");
-        
-        // 检查 editPanel 是否存在
-        if (!editPanel.value) {
-          throw new Error("editPanel 未初始化");
+        try {
+          // 2. 加载模型
+          console.log(`[批量打标] 开始加载模型...`);
+          const fileData = await getModelFile(file.id);
+          if (!fileData || !fileData.fileBlob) {
+            throw new Error("无法获取文件数据");
+          }
+          
+          await offscreenRenderer.loadModel(fileData.fileBlob, file.name);
+          console.log(`[批量打标] 模型加载成功`);
+          
+          // 3. 获取材质列表并截图
+          const materials = offscreenRenderer.getMaterialList();
+          console.log(`[批量打标] 找到 ${materials.length} 个材质`);
+          if (!materials.length) throw new Error("未找到材质");
+          
+          console.log(`[批量打标] 开始截图，视角: ${viewKeys.join(', ')}`);
+          for (const mesh of materials) {
+            console.log(`[批量打标] 正在为材质 ${mesh.name || mesh.uuid} 截图...`);
+            const imgs = await offscreenRenderer.captureMultiAngleMaterial(mesh, viewKeys);
+            
+            if (imgs && imgs.length > 0) {
+              console.log(`[批量打标] 材质 ${mesh.name || mesh.uuid} 截图成功，共 ${imgs.length} 张`);
+              images.push(imgs);
+              materialNames.push(mesh.name || mesh.uuid);
+              targetMaterialNames.push(mesh.material?.name);
+            } else {
+              console.warn(`[批量打标] 材质 ${mesh.name || mesh.uuid} 截图为空`);
+            }
+          }
+        } finally {
+          // 注意：不在这里释放渲染器，要等到导出完成后
         }
-        if (!editPanel.value.captureMaterialWithViews) {
-          throw new Error("captureMaterialWithViews 方法不存在");
-        }
         
-        // 使用用户选择的视角截图
-        console.log(`[批量打标] 开始截图，视角: ${viewKeys.join(', ')}`);
-        for (const mesh of materials) {
-           console.log(`[批量打标] 正在为材质 ${mesh.name || mesh.uuid} 截图...`);
-           const imgs = await editPanel.value.captureMaterialWithViews(mesh, viewKeys);
-           
-           // 防御性检查
-           if (!imgs) {
-             console.warn(`[批量打标] captureMaterialWithViews 返回 null/undefined`);
-             continue;
-           }
-           if (!Array.isArray(imgs)) {
-             console.warn(`[批量打标] captureMaterialWithViews 返回非数组: ${typeof imgs}`);
-             continue;
-           }
-           
-           if (imgs.length > 0) {
-             console.log(`[批量打标] 材质 ${mesh.name || mesh.uuid} 截图成功，共 ${imgs.length} 张`);
-             images.push(imgs);
-             materialNames.push(mesh.name || mesh.uuid);
-             targetMaterialNames.push(mesh.material?.name);
-           } else {
-             console.warn(`[批量打标] 材质 ${mesh.name || mesh.uuid} 截图为空`);
-           }
-        }
-      } finally {
-        sceneLock.release();
-        console.log(`[批量打标] 已释放场景锁`);
+      } else {
+        // 降级：使用传统屏幕渲染模式（不实现场景锁，因为已移除）
+        throw new Error("传统渲染模式已不支持，请使用支持 OffscreenCanvas 的浏览器");
       }
       
       console.log(`[批量打标] 截图完成，共 ${images.length} 组图片`);
       if (!images.length) throw new Error("截图失败");
 
       // 2. 发送 VLM 请求 (并行)
-      // 根据选择规则从提示词库中选择提示词
       const selectPrompt = () => {
         if (vlmConfig.promptList.length === 1) return vlmConfig.promptList[0].content;
         
@@ -762,7 +759,6 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
           const randomIndex = Math.floor(Math.random() * vlmConfig.promptList.length);
           return vlmConfig.promptList[randomIndex].content;
         } else {
-          // 加权选择
           const totalWeight = vlmConfig.promptList.reduce((sum, p) => sum + (p.weight || 1), 0);
           let random = Math.random() * totalWeight;
           
@@ -780,112 +776,66 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
       console.log(`[批量打标] 准备 VLM 请求，共 ${images.length} 个材质`);
       const requests = images.map(imgs => [selectPrompt(), imgs, {}]);
       
-      // 这里的 generateBatch 是针对一个文件的多个材质
-      // 我们复用 vlmClient.generateBatch，它内部是并发控制的，
-      // 但这里我们是文件级别的并发。
-      // 为了简化，我们对单文件内的材质请求也进行并发
-      
       console.log(`[批量打标] 开始调用 VLM API...`);
-      const results = await vlmClient.generateBatch(requests, 4); // 单文件内最大4并发
+      const results = await vlmClient.generateBatch(requests, 4);
       console.log(`[批量打标] VLM API 调用完成，收到 ${results.length} 个结果`);
       
       const batchResults = results.map((res, idx) => ({
         ...res,
         materialName: materialNames[idx],
-        targetMaterialName: targetMaterialNames[idx]
+        targetMaterialName: targetMaterialNames[idx],
+        label: res.text // 确保有 label 字段
       }));
 
       // 检查VLM生成结果的有效性
       const successCount = batchResults.filter(res => !res.error && res.text).length;
-      const totalCount = batchResults.length;
-      const failureCount = totalCount - successCount;
+      const totalMatCount = batchResults.length;
+      const failureCount = totalMatCount - successCount;
       
-      console.log(`[批量打标] VLM结果统计: 成功 ${successCount}/${totalCount}, 失败 ${failureCount}`);
+      console.log(`[批量打标] VLM结果统计: 成功 ${successCount}/${totalMatCount}, 失败 ${failureCount}`);
       
-      // 如果全部失败，跳过该文件
       if (successCount === 0) {
         console.warn(`[批量打标] ⚠️ 文件 ${file.name} 所有材质标签生成失败，跳过处理`);
         ElMessage.warning(`文件 ${file.name} 所有材质标签生成失败，已跳过`);
         
-        // 清理IndexedDB中的临时文件
-        console.log(`[批量打标] 删除 IndexedDB 临时文件...`);
         await deleteModelFile(file.id);
-        
-        // 标记为跳过状态
         file.status = 'skipped';
         fileStore.addOrUpdateFile({ ...file, status: 'skipped' });
-        
-        // 直接返回，不进行后续处理
         return;
       }
       
-      // 如果部分失败，记录警告但继续处理
       if (failureCount > 0) {
         console.warn(`[批量打标] ⚠️ 文件 ${file.name} 有 ${failureCount} 个材质标签生成失败，仍继续处理成功的 ${successCount} 个`);
         ElMessage.warning(`文件 ${file.name}: ${failureCount} 个材质失败，${successCount} 个成功`);
       }
 
-      // 3. 写入标签
+      // 3. 写入标签并导出
       const isGlb = /\.(glb|gltf)$/i.test(file.name);
       console.log(`[批量打标] 文件类型: ${isGlb ? 'GLB/GLTF' : 'OBJ'}`);
       
-      if (isGlb) {
-        // GLB 需要场景锁来写入和导出 (互斥)
-        console.log(`[批量打标] 等待获取场景锁以写入标签...`);
-        await sceneLock.acquire();
-        console.log(`[批量打标] 已获取场景锁，开始写入标签`);
-        try {
-           // 不需要重新加载模型！直接在当前已加载的模型上写入标签
-           // 因为模型已经在截图时加载了，重新加载会覆盖已加载的模型
-           console.log(`[批量打标] 使用当前已加载的模型，直接写入标签...`);
-           
-           console.log(`[批量打标] 调用 writeAutoTags...`);
-           await editPanel.value.writeAutoTags(file.id, batchResults);
-           
-           // 4. 导出并上传到服务器labeled_files
-           console.log(`[批量打标] 导出 GLB 文件...`);
-           const modelBlob = await store.modelApi.exportSceneToGlbBlob();
-           console.log(`[批量打标] 导出完成，文件大小: ${modelBlob.size} bytes`);
-           
-           console.log(`[批量打标] 上传到服务器 labeled_files...`);
-           await moveToLabeled(file.serverFileId || file.id, modelBlob, {
-             name: file.name,
-             // labels: batchResults, // 不写入json文件
-             hasLabels: true,
-             size: modelBlob.size,
-             updatedAt: new Date().toISOString()
-           });
-           
-           // 5. 从IndexedDB删除临时文件
-           console.log(`[批量打标] 删除 IndexedDB 临时文件...`);
-           await deleteModelFile(file.id);
-           
-        } finally {
-           sceneLock.release();
-           console.log(`[批量打标] 已释放场景锁`);
-        }
-      } else {
-        // OBJ 可以直接写入 Blob (无需场景)
-        console.log(`[批量打标] 调用 writeAutoTags (OBJ)...`);
-        await editPanel.value.writeAutoTags(file.id, batchResults);
+      if (isGlb && offscreenRenderer) {
+        // 使用离屏渲染器导出 GLB
+        console.log(`[批量打标] 应用标签到离屏模型...`);
+        offscreenRenderer.applySemanticLabels(batchResults);
         
-        // 对于非GLB文件，也需要上传到服务器
-        // 获取更新后的文件
-        console.log(`[批量打标] 获取更新后的文件...`);
-        const updatedFile = await getModelFile(file.id);
-        if (updatedFile && updatedFile.fileBlob) {
-          console.log(`[批量打标] 上传到服务器 labeled_files...`);
-          await moveToLabeled(file.serverFileId || file.id, updatedFile.fileBlob, {
-            name: file.name,
-            // labels: batchResults, // 不写入json文件
-            hasLabels: true,
-            size: updatedFile.fileBlob.size,
-            updatedAt: new Date().toISOString()
-          });
-          
-          console.log(`[批量打标] 删除 IndexedDB 临时文件...`);
-          await deleteModelFile(file.id);
-        }
+        console.log(`[批量打标] 导出 GLB 文件...`);
+        const modelBlob = await offscreenRenderer.exportToGlbBlob();
+        console.log(`[批量打标] 导出完成，文件大小: ${modelBlob.size} bytes`);
+        
+        console.log(`[批量打标] 上传到服务器 labeled_files...`);
+        await moveToLabeled(file.serverFileId || file.id, modelBlob, {
+          name: file.name,
+          hasLabels: true,
+          size: modelBlob.size,
+          updatedAt: new Date().toISOString()
+        });
+        
+        console.log(`[批量打标] 删除 IndexedDB 临时文件...`);
+        await deleteModelFile(file.id);
+        
+      } else if (!isGlb) {
+        // OBJ 文件处理（需要使用原有方法）
+        throw new Error("OBJ 文件暂不支持离屏渲染模式");
       }
 
       console.log(`[批量打标] 文件 ${file.name} 处理完成`);
@@ -901,6 +851,12 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
       file.status = 'error';
       fileStore.addOrUpdateFile({ ...file, status: 'error' });
     } finally {
+      // 释放渲染器
+      if (offscreenRenderer && renderPool) {
+        renderPool.release(offscreenRenderer);
+        console.log(`[批量打标] 已释放离屏渲染器`);
+      }
+      
       processedCount.value++;
       updateProgress();
       console.log(`[批量打标] 进度: ${processedCount.value}/${totalCount.value}`);
@@ -930,6 +886,14 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
   };
 
   await Promise.all(activeWorkers.map(() => runWorker()));
+
+  // 清理渲染池
+  if (renderPool) {
+    console.log('[批量打标] 清理渲染池...');
+    await renderPool.cleanup();
+    renderPool.printStatus();
+    renderPool = null;
+  }
 
   // 批次完成后，清理IndexedDB
   console.log(`[批量打标] 清理批次 ${currentPageVal} 的临时文件...`);
