@@ -568,6 +568,7 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
         await fileListRef.value.loadFileList();
       }
       
+      
       // 递归调用处理下一页
       await handleBatchTagging({ concurrency, viewKeys });
       return;
