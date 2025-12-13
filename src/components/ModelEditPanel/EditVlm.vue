@@ -772,7 +772,7 @@ onMounted(async () => {
   
   // 先尝试从服务器文件加载提示词
   try {
-    const response = await fetch(`${API_BASE_URL}/prompts-library`, {
+    const response = await fetch(`${API_BASE_URL}/prompts-library`);
     if (response.ok) {
       const result = await response.json();
       if (result.success && result.data?.prompts?.length > 0) {
@@ -1340,7 +1340,7 @@ const savePromptsToServer = async () => {
       ignoreKeywords: filteredKeywords
     });
     
-    const response = await fetch('http://localhost:30005/api/prompts-library', {
+    const response = await fetch(`${API_BASE_URL}/prompts-library`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
