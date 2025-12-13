@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:30001/api';
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:30005/api';
 const CHUNK_SIZE = parseInt(import.meta.env.VITE_CHUNK_SIZE) || 10 * 1024 * 1024; // 10MB 默认
 
 /**
