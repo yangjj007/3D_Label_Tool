@@ -466,12 +466,57 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
       console.warn(`[批量打标] 获取 labeled_files 列表失败，将继续处理:`, labeledErr);
     }
 
-    // 3. 下载当前批次文件到IndexedDB
-    console.log(`[批量打标] 开始下载文件:`, rawFiles.map(f => ({ id: f.id, name: f.name })));
-    ElMessage.info(`正在加载 ${rawFiles.length} 个文件到工作区...`);
+    // 3. 在下载前过滤掉已打标的文件
+    const filesToDownload = rawFiles.filter(file => {
+      if (labeledFilesSet.has(file.name)) {
+        console.log(`[批量打标] 跳过下载文件 ${file.name}: labeled_files中已存在`);
+        return false;
+      }
+      return true;
+    });
+
+    const skippedBeforeDownload = rawFiles.length - filesToDownload.length;
+    if (skippedBeforeDownload > 0) {
+      console.log(`[批量打标] 跳过下载 ${skippedBeforeDownload} 个已打标文件`);
+      ElMessage.info(`跳过 ${skippedBeforeDownload} 个已打标文件，仅下载 ${filesToDownload.length} 个文件`);
+    }
+
+    // 如果所有文件都已打标，直接跳转到下一页
+    if (filesToDownload.length === 0) {
+      const totalPages = Math.ceil(response.total / pageSizeVal);
+      const hasNextPage = currentPageVal < totalPages;
+      
+      console.log(`[批量打标] 当前页所有文件都已打标，当前页: ${currentPageVal}/${totalPages}`);
+      
+      if (hasNextPage) {
+        // 有下一页，自动跳转到下一页继续处理
+        const remainingFiles = response.total - currentPageVal * pageSizeVal;
+        ElMessage.info(`当前页已完成，自动跳转到第 ${currentPageVal + 1} 页继续处理剩余 ${remainingFiles} 个文件...`);
+        console.log(`[批量打标] 自动跳转到第 ${currentPageVal + 1} 页`);
+        
+        // 更新文件列表组件的当前页码并刷新列表
+        if (fileListRef.value) {
+          fileListRef.value.currentPage = currentPageVal + 1;
+          await fileListRef.value.loadFileList();
+        }
+        
+        // 递归调用处理下一页
+        await handleBatchTagging({ concurrency, viewKeys });
+        return;
+      } else {
+        // 没有下一页了，所有文件都已打标完成
+        ElMessage.success("🎉 所有文件都已打标完成！");
+        console.log(`[批量打标] 所有文件都已打标完成`);
+        return;
+      }
+    }
+
+    // 4. 下载当前批次文件到IndexedDB（仅下载需要的文件）
+    console.log(`[批量打标] 开始下载文件:`, filesToDownload.map(f => ({ id: f.id, name: f.name })));
+    ElMessage.info(`正在加载 ${filesToDownload.length} 个文件到工作区...`);
     
     const downloadResults = await Promise.allSettled(
-      rawFiles.map(file => 
+      filesToDownload.map(file => 
         downloadModelFromServer(file.id, {
           ...file,
           isTemporary: true,
@@ -492,15 +537,15 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
         console.error(`[批量打标] 失败文件 ${idx + 1}:`, result.reason);
       });
     }
-    console.log(`[批量打标] 下载完成，成功: ${downloadResults.filter(r => r.status === 'fulfilled').length}/${rawFiles.length}`);
+    console.log(`[批量打标] 下载完成，成功: ${downloadResults.filter(r => r.status === 'fulfilled').length}/${filesToDownload.length}`);
     
-    // 4. 立即预加载下一页（如果存在）
+    // 5. 立即预加载下一页（如果存在）
     const currentBatchNumber = currentPageVal;
     if (response.total > currentPageVal * pageSizeVal) {
       preloadNextBatch(currentPageVal + 1, pageSizeVal);
     }
 
-    // 5. 更新fileStore，使用IndexedDB中的文件
+    // 6. 更新fileStore，使用IndexedDB中的文件
     console.log(`[批量打标] 从 IndexedDB 读取文件，批次号: ${currentPageVal}`);
     const workspaceFiles = await getAllFiles();
     console.log(`[批量打标] IndexedDB 中总文件数: ${workspaceFiles.length}`);
@@ -526,17 +571,11 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
     return;
   }
 
-  // 过滤出未打标的文件（检查本地标记和服务器端labeled_files文件夹）
+  // 二次过滤：检查本地标记（服务器端已在下载前过滤）
   const untaggedFiles = fileStore.files.filter(file => {
     // 如果本地已标记为已打标，跳过
     if (file.hasLabels || (file.labels && file.labels.length > 0)) {
       console.log(`[批量打标] 跳过文件 ${file.name}: 本地已标记为已打标`);
-      return false;
-    }
-    
-    // 如果服务器端labeled_files文件夹中已存在同名文件，跳过（断点续传）
-    if (labeledFilesSet.has(file.name)) {
-      console.log(`[批量打标] 跳过文件 ${file.name}: labeled_files中已存在`);
       return false;
     }
     
@@ -545,12 +584,12 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
 
   const skippedCount = fileStore.files.length - untaggedFiles.length;
   if (skippedCount > 0) {
-    console.log(`[批量打标] 跳过 ${skippedCount} 个已打标文件`);
-    ElMessage.info(`跳过 ${skippedCount} 个已打标文件`);
+    console.log(`[批量打标] 跳过 ${skippedCount} 个本地已标记的文件`);
+    ElMessage.info(`跳过 ${skippedCount} 个本地已标记的文件`);
   }
 
   if (!untaggedFiles.length) {
-    // 当前页所有文件都已打标，检查是否还有下一页
+    // 当前页所有文件都已打标，检查是否还有下一页（理论上不会到这里，因为已在下载前判断）
     const totalPages = Math.ceil(response.total / pageSizeVal);
     const hasNextPage = currentPageVal < totalPages;
     
