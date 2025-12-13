@@ -80,7 +80,7 @@ git pull origin main
 ### 配置说明
 
 #### 服务器地址
-默认：`http://localhost:3001`
+默认：`http://localhost:30001`
 
 如需修改，请在以下位置更新：
 - `src/components/ModelEditPanel/EditVlm.vue` 第 1183、1220、677 行

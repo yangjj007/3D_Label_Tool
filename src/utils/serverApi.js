@@ -4,7 +4,7 @@ import { ChunkedDownloader } from './chunkedDownload';
 import { saveModelFile, deleteModelFile, listFolderFiles } from './filePersistence';
 import { getFileType } from './utilityFunction';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001/api';
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:30001/api';
 
 /**
  * 获取服务器文件列表（分页）

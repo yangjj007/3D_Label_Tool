@@ -37,7 +37,7 @@ cp .env.example .env
 编辑 `.env` 文件（开发环境默认配置即可）：
 
 ```env
-VITE_API_BASE_URL=http://localhost:3001/api
+VITE_API_BASE_URL=http://localhost:30001/api
 VITE_CHUNK_SIZE=10485760
 VITE_DEFAULT_BATCH_SIZE=10
 VITE_MAX_CONCURRENT_TAGS=3
@@ -63,7 +63,7 @@ npm run server
 
 服务地址：
 - 前端：http://localhost:5173
-- 后端：http://localhost:3001
+- 后端：http://localhost:30001
 
 ## 工作流程说明
 
@@ -168,7 +168,7 @@ npm run server
 ### Q1: 文件上传失败
 
 **A:** 检查以下几点：
-- 服务器端口3001是否正常运行
+- 服务器端口30001是否正常运行
 - 网络连接是否正常
 - 磁盘空间是否充足
 - 文件格式是否支持（.glb, .gltf, .obj, .fbx, .stl）

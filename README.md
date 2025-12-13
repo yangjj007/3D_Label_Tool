@@ -25,7 +25,7 @@
 
 
 pnpm run dev:full
-npx pnpm run dev:full
+npx pnpm run dev:full -y
 ```
 
 ### 🎨 预览

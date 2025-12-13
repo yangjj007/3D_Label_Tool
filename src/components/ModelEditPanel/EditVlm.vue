@@ -771,7 +771,7 @@ onMounted(async () => {
   
   // 先尝试从服务器文件加载提示词
   try {
-    const response = await fetch('http://localhost:3001/api/prompts-library');
+    const response = await fetch('http://localhost:30001/api/prompts-library');
     if (response.ok) {
       const result = await response.json();
       if (result.success && result.data?.prompts?.length > 0) {
@@ -1339,7 +1339,7 @@ const savePromptsToServer = async () => {
       ignoreKeywords: filteredKeywords
     });
     
-    const response = await fetch('http://localhost:3001/api/prompts-library', {
+    const response = await fetch('http://localhost:30001/api/prompts-library', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
@@ -1378,7 +1378,7 @@ const loadPromptsFromServer = async () => {
   loadingPrompts.value = true;
   
   try {
-    const response = await fetch('http://localhost:3001/api/prompts-library');
+    const response = await fetch('http://localhost:30001/api/prompts-library');
     
     if (!response.ok) {
       throw new Error(`加载失败: ${response.statusText}`);
