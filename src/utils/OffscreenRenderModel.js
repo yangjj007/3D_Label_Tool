@@ -44,9 +44,8 @@ export const CAMERA_VIEW_PRESETS = {
 class OffscreenRenderModel {
   // 静态 GPU 操作信号量（所有实例共享）
   // 限制同时进行的 GPU 读回操作数量，防止 GPU 过载
-  // SwiftShader 软件渲染时建议设为 4，硬件 GPU 可设为 8-16
   static gpuSemaphore = {
-    max: 4, // SwiftShader 模式下更保守
+    max: 8,
     current: 0,
     queue: []
   };

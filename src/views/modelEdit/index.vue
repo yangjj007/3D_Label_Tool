@@ -685,47 +685,9 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
   
   if (useOffscreenRendering) {
     console.log('[批量打标] ✓ 支持 OffscreenCanvas，使用并行渲染模式');
-    
-    // 智能限制池大小
-    let poolSize = concurrency;
-    
-    // 检测是否使用 SwiftShader 软件渲染
-    const isSwiftShader = await (async () => {
-      try {
-        const testCanvas = new OffscreenCanvas(1, 1);
-        const testRenderer = new THREE.WebGLRenderer({ canvas: testCanvas });
-        const gl = testRenderer.getContext();
-        const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
-        if (debugInfo) {
-          const renderer = gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL);
-          testRenderer.dispose();
-          return renderer.includes('SwiftShader');
-        }
-        testRenderer.dispose();
-        return false;
-      } catch {
-        return false;
-      }
-    })();
-    
-    if (isSwiftShader) {
-      // SwiftShader 软件渲染：严格限制并发数
-      console.warn('[批量打标] ⚠️ 检测到 SwiftShader 软件渲染');
-      if (poolSize > 8) {
-        console.warn(`[批量打标] ⚠️ SwiftShader 模式下，并发数 ${concurrency} 过高，强制限制为 8`);
-        ElMessage.warning(`检测到软件渲染模式，并发数已自动降低到 8 以保证稳定性`);
-        poolSize = 8;
-      }
-    } else {
-      // 硬件 GPU：最多 32 个并发
-      if (poolSize > 32) {
-        console.warn(`[批量打标] ⚠️ 并发数 ${concurrency} 过高，强制限制为 32`);
-        ElMessage.warning(`并发数过高（${concurrency}），已自动降低到 32 以保证稳定性`);
-        poolSize = 32;
-      }
-    }
-    
-    console.log(`[批量打标] 创建渲染池，请求并发数: ${concurrency}, 实际池大小: ${poolSize}${isSwiftShader ? ' (SwiftShader 模式)' : ''}`);
+    // 让池大小等于并发数，最大支持100个（避免过度消耗系统资源）
+    const poolSize = Math.min(concurrency, 100);
+    console.log(`[批量打标] 创建渲染池，并发数: ${concurrency}, 实际池大小: ${poolSize}`);
     renderPool = new RenderPool(poolSize);
     
     try {
@@ -1279,11 +1241,58 @@ onMounted(async () => {
   await loadPersistedFiles();
   // 全屏监听事件
   document.addEventListener("fullscreenchange", addEventListenerFullscreen);
+
+  // 暴露全局API给自动化脚本使用
+  if (typeof window !== 'undefined') {
+    // 暴露批量打标函数
+    window.startBatchLabeling = async (options = {}) => {
+      console.log('[Global API] 接收到批量打标请求:', options);
+      try {
+        await handleBatchTagging({
+          concurrency: options.concurrency || 4,
+          viewKeys: options.viewKeys || ['axial']
+        });
+        return { success: true };
+      } catch (error) {
+        console.error('[Global API] 批量打标失败:', error);
+        return { success: false, error: error.message };
+      }
+    };
+    
+    // 暴露Vue实例用于状态监控
+    window.__VUE_APP__ = getCurrentInstance();
+    
+    // 暴露批量处理状态（用于自动化脚本监控）
+    const updateBatchStatus = () => {
+      window.__BATCH_STATUS__ = {
+        processed: processedCount.value,
+        total: totalCount.value,
+        isProcessing: isBatchProcessing.value
+      };
+    };
+    
+    // 监听状态变化并更新
+    const statusWatcher = setInterval(updateBatchStatus, 1000);
+    
+    // 在卸载时清理定时器
+    onBeforeUnmount(() => {
+      clearInterval(statusWatcher);
+    });
+    
+    console.log('[Global API] 自动化接口已就绪 ✅');
+  }
 });
 onBeforeUnmount(() => {
   store.modelApi.onClearModelData();
   document.removeEventListener("fullscreenchange", addEventListenerFullscreen);
   clearTimeout(loadingTimeout.value);
+  
+  // 清理全局变量
+  if (typeof window !== 'undefined') {
+    delete window.startBatchLabeling;
+    delete window.__VUE_APP__;
+    delete window.__BATCH_STATUS__;
+  }
 });
 </script>
 

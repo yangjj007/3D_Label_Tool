@@ -22,6 +22,14 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 pnpm-lock.yaml*
+logs/
+*.log
+
+# 自动化批量打标相关
+.server.pid
+.frontend.pid
+automation/*.pid
+/tmp/chrome-batch-labeling
 
 # Editor directories and files
 .idea
