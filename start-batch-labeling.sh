@@ -29,7 +29,7 @@ NC='\033[0m' # No Color
 # 配置
 export SERVER_URL="${SERVER_URL:-http://localhost:29999}"
 export API_URL="${API_URL:-http://localhost:30005}"
-export CONCURRENCY="${CONCURRENCY:-4}"
+export CONCURRENCY="${CONCURRENCY:-16}"
 export VIEW_KEYS="${VIEW_KEYS:-axial}"
 export CHROME_DEBUG_PORT="${CHROME_DEBUG_PORT:-30000}"
 
