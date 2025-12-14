@@ -27,12 +27,21 @@ class RenderPool {
     // 初始化状态
     this.initialized = false;
     
+    // GPU 操作信号量（限制同时进行的 GPU 读回操作）
+    // 防止过多并发导致 GPU 过载
+    this.gpuOperationSemaphore = {
+      max: Math.min(Math.ceil(poolSize / 4), 16), // 最多同时 1/4 的渲染器数量或16个
+      current: 0,
+      queue: []
+    };
+    
     // 性能监控
     this.stats = {
       totalAcquired: 0,
       totalReleased: 0,
       maxWaitTime: 0,
-      avgWaitTime: 0
+      avgWaitTime: 0,
+      gpuOperationWaits: 0
     };
   }
 
@@ -103,6 +112,13 @@ class RenderPool {
       
       const elapsed = Date.now() - startTime;
       console.log(`[RenderPool] 初始化完成，耗时: ${elapsed}ms`);
+      
+      // 统计 GPU 使用情况
+      console.log(`[RenderPool] 📊 资源统计:`);
+      console.log(`  - 渲染器数量: ${this.poolSize}`);
+      console.log(`  - 每个渲染器分辨率: ${this.width}x${this.height}`);
+      console.log(`  - GPU 信号量上限: ${this.gpuOperationSemaphore.max}`);
+      console.log(`  - 预估总显存占用: ~${Math.round(this.poolSize * this.width * this.height * 4 / 1024 / 1024)}MB（理论值）`);
     } catch (error) {
       console.error('[RenderPool] 初始化失败:', error);
       // 清理已创建的渲染器
@@ -266,6 +282,46 @@ class RenderPool {
 
     console.log('[RenderPool] 渲染池清理完成');
     this.printStatus();
+  }
+
+  /**
+   * 获取 GPU 操作许可（用于限制并发 GPU 读回操作）
+   * @returns {Promise<Function>} 返回释放函数
+   */
+  async acquireGpuOperation() {
+    const sem = this.gpuOperationSemaphore;
+    
+    if (sem.current < sem.max) {
+      sem.current++;
+      // console.log(`[RenderPool] GPU操作许可获取 (${sem.current}/${sem.max})`);
+      return () => this.releaseGpuOperation();
+    }
+    
+    // 需要等待
+    return new Promise((resolve) => {
+      sem.queue.push(() => {
+        sem.current++;
+        this.stats.gpuOperationWaits++;
+        // console.log(`[RenderPool] GPU操作许可等待后获取 (${sem.current}/${sem.max})`);
+        resolve(() => this.releaseGpuOperation());
+      });
+    });
+  }
+  
+  /**
+   * 释放 GPU 操作许可
+   */
+  releaseGpuOperation() {
+    const sem = this.gpuOperationSemaphore;
+    sem.current--;
+    
+    // console.log(`[RenderPool] GPU操作许可释放 (${sem.current}/${sem.max})`);
+    
+    // 如果有等待的操作，立即分配
+    if (sem.queue.length > 0) {
+      const next = sem.queue.shift();
+      next();
+    }
   }
 
   /**

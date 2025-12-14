@@ -42,6 +42,50 @@ export const CAMERA_VIEW_PRESETS = {
 };
 
 class OffscreenRenderModel {
+  // 静态 GPU 操作信号量（所有实例共享）
+  // 限制同时进行的 GPU 读回操作数量，防止 GPU 过载
+  // SwiftShader 软件渲染时建议设为 4，硬件 GPU 可设为 8-16
+  static gpuSemaphore = {
+    max: 4, // SwiftShader 模式下更保守
+    current: 0,
+    queue: []
+  };
+  
+  /**
+   * 获取 GPU 操作许可
+   * @returns {Promise<Function>} 返回释放函数
+   */
+  static async acquireGpuPermit() {
+    const sem = OffscreenRenderModel.gpuSemaphore;
+    
+    if (sem.current < sem.max) {
+      sem.current++;
+      return () => OffscreenRenderModel.releaseGpuPermit();
+    }
+    
+    // 需要等待
+    return new Promise((resolve) => {
+      sem.queue.push(() => {
+        sem.current++;
+        resolve(() => OffscreenRenderModel.releaseGpuPermit());
+      });
+    });
+  }
+  
+  /**
+   * 释放 GPU 操作许可
+   */
+  static releaseGpuPermit() {
+    const sem = OffscreenRenderModel.gpuSemaphore;
+    sem.current--;
+    
+    // 如果有等待的操作，立即分配
+    if (sem.queue.length > 0) {
+      const next = sem.queue.shift();
+      next();
+    }
+  }
+  
   constructor(width = 1200, height = 900, enableDebugScreenshots = false) {
     // 提高分辨率以改善渲染质量
     this.width = width;
@@ -53,6 +97,7 @@ class OffscreenRenderModel {
     // 核心组件
     this.canvas = null;
     this.renderer = null;
+    this.gl = null; // WebGL 上下文
     this.scene = null;
     this.camera = null;
     this.model = null;
@@ -98,8 +143,42 @@ class OffscreenRenderModel {
         canvas: this.canvas,
         antialias: true, // 启用抗锯齿以提升渲染质量
         alpha: true,
-        preserveDrawingBuffer: true
+        preserveDrawingBuffer: true,
+        powerPreference: 'high-performance' // 强制使用高性能 GPU
       });
+      
+      // 获取 WebGL 上下文进行诊断
+      this.gl = this.renderer.getContext();
+      
+      // 检查是否真的在使用 GPU 硬件加速
+      const debugInfo = this.gl.getExtension('WEBGL_debug_renderer_info');
+      if (debugInfo) {
+        const vendor = this.gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL);
+        const renderer = this.gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL);
+        console.log('[OffscreenRenderModel] 🎮 GPU 信息:');
+        console.log(`  - 厂商: ${vendor}`);
+        console.log(`  - 渲染器: ${renderer}`);
+        
+        // 检查是否是软件渲染
+        const isSoftwareRenderer = 
+          renderer.includes('SwiftShader') || 
+          renderer.includes('llvmpipe') || 
+          renderer.includes('Software') ||
+          renderer.includes('Microsoft');
+        
+        if (isSoftwareRenderer) {
+          console.warn('[OffscreenRenderModel] ⚠️ 警告：正在使用软件渲染，没有 GPU 加速！');
+          console.warn('[OffscreenRenderModel] ⚠️ 这可能导致性能问题和 convertToBlob 失败');
+        } else {
+          console.log('[OffscreenRenderModel] ✅ 正在使用 GPU 硬件加速');
+        }
+      } else {
+        console.warn('[OffscreenRenderModel] ⚠️ 无法获取 GPU 调试信息');
+      }
+      
+      // 检查 WebGL 版本
+      const glVersion = this.gl.getParameter(this.gl.VERSION);
+      console.log(`[OffscreenRenderModel] WebGL 版本: ${glVersion}`);
       
       // 第三个参数 false 很重要：OffscreenCanvas 没有 style 属性
       this.renderer.setSize(this.width, this.height, false);
@@ -129,6 +208,41 @@ class OffscreenRenderModel {
       
       // 初始化后期处理（需要在场景和相机创建之后）
       this.setupPostProcessing();
+      
+      // 执行一次测试渲染来验证 GPU 是否工作
+      console.log('[OffscreenRenderModel] 执行 GPU 测试渲染...');
+      const testStart = performance.now();
+      
+      // 创建一个简单的测试几何体
+      const testGeometry = new THREE.BoxGeometry(1, 1, 1);
+      const testMaterial = new THREE.MeshStandardMaterial({ color: 0x00ff00 });
+      const testMesh = new THREE.Mesh(testGeometry, testMaterial);
+      this.scene.add(testMesh);
+      
+      // 渲染几帧
+      for (let i = 0; i < 10; i++) {
+        this.renderer.render(this.scene, this.camera);
+      }
+      
+      // 强制 GPU 完成
+      this.gl.finish();
+      
+      const testEnd = performance.now();
+      const testTime = testEnd - testStart;
+      
+      // 清理测试对象
+      this.scene.remove(testMesh);
+      testGeometry.dispose();
+      testMaterial.dispose();
+      
+      console.log(`[OffscreenRenderModel] GPU 测试完成，10帧耗时: ${testTime.toFixed(2)}ms`);
+      
+      // 如果渲染太慢，可能是软件渲染
+      if (testTime > 500) {
+        console.warn('[OffscreenRenderModel] ⚠️ 渲染性能异常慢，可能使用了软件渲染！');
+      } else if (testTime < 50) {
+        console.log('[OffscreenRenderModel] ✅ 渲染性能良好，GPU 加速正常工作');
+      }
       
       this.initialized = true;
       console.log('[OffscreenRenderModel] 初始化成功');
@@ -500,7 +614,7 @@ class OffscreenRenderModel {
   }
 
   /**
-   * 捕获当前视图为 Blob
+   * 捕获当前视图为 Blob（带重试机制和 GPU 信号量）
    * @returns {Promise<Blob>}
    */
   async captureToBlob() {
@@ -511,16 +625,51 @@ class OffscreenRenderModel {
     // 渲染场景
     this.render();
     
-    // OffscreenCanvas 支持 convertToBlob
+    // 等待 GPU 完成渲染（增加延迟，避免读回失败）
+    await new Promise(resolve => setTimeout(resolve, 150));
+    
+    // 获取 GPU 操作许可（限制并发，防止 GPU 过载）
+    const releaseGpu = await OffscreenRenderModel.acquireGpuPermit();
+    
     try {
-      const blob = await this.canvas.convertToBlob({
-        type: 'image/png',
-        quality: 0.92
-      });
-      return blob;
-    } catch (error) {
-      console.error('[OffscreenRenderModel] convertToBlob 失败:', error);
-      throw error;
+      // OffscreenCanvas 支持 convertToBlob，带重试机制
+      const maxRetries = 5;
+      let lastError = null;
+      
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+          const blob = await this.canvas.convertToBlob({
+            type: 'image/png',
+            quality: 0.92
+          });
+          
+          if (attempt > 1) {
+            console.log(`[OffscreenRenderModel] convertToBlob 重试第 ${attempt - 1} 次成功`);
+          }
+          
+          return blob;
+        } catch (error) {
+          lastError = error;
+          
+          if (attempt < maxRetries) {
+            // 指数退避：等待时间随重试次数增加
+            const delay = Math.min(100 * Math.pow(2, attempt - 1), 2000);
+            console.warn(`[OffscreenRenderModel] convertToBlob 失败 (尝试 ${attempt}/${maxRetries})，${delay}ms 后重试:`, error.message);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            
+            // 重新渲染
+            this.render();
+            await new Promise(resolve => setTimeout(resolve, 150));
+          } else {
+            console.error(`[OffscreenRenderModel] convertToBlob 失败，已重试 ${maxRetries} 次:`, error);
+          }
+        }
+      }
+      
+      throw lastError;
+    } finally {
+      // 确保释放 GPU 许可
+      releaseGpu();
     }
   }
 
@@ -929,6 +1078,7 @@ class OffscreenRenderModel {
 
     // 清理其他引用
     this.canvas = null;
+    this.gl = null;
     this.camera = null;
     this.scene = null;
     this.modelMaterialList = [];
