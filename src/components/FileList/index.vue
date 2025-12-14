@@ -45,8 +45,8 @@
     <el-dialog v-model="showBatchTagDialog" title="批量打标配置" width="400px" append-to-body>
       <div class="batch-tag-config">
         <div class="config-item">
-          <span class="label">最大并行数 (1-8):</span>
-          <el-slider v-model="batchConcurrency" :min="1" :max="8" show-input />
+          <span class="label">最大并行数 (1-64):</span>
+          <el-slider v-model="batchConcurrency" :min="1" :max="64" show-input />
         </div>
         <div class="config-item">
           <span class="label">截图视角选择:</span>
