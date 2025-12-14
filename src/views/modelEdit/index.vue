@@ -685,7 +685,9 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
   
   if (useOffscreenRendering) {
     console.log('[批量打标] ✓ 支持 OffscreenCanvas，使用并行渲染模式');
-    const poolSize = Math.min(concurrency, 10);
+    // 让池大小等于并发数，最大支持100个（避免过度消耗系统资源）
+    const poolSize = Math.min(concurrency, 100);
+    console.log(`[批量打标] 创建渲染池，并发数: ${concurrency}, 实际池大小: ${poolSize}`);
     renderPool = new RenderPool(poolSize);
     
     try {

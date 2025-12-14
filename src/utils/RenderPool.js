@@ -9,7 +9,7 @@ import OffscreenRenderModel from './OffscreenRenderModel';
 
 class RenderPool {
   constructor(poolSize = 5, width = 1200, height = 900, enableDebugScreenshots = false) {
-    this.poolSize = Math.max(1, Math.min(poolSize, 10)); // 限制在 1-10 个
+    this.poolSize = Math.max(1, Math.min(poolSize, 100)); // 限制在 1-100 个（避免资源耗尽）
     this.width = width;
     this.height = height;
     this.enableDebugScreenshots = enableDebugScreenshots; // 调试截图开关
@@ -298,7 +298,7 @@ class RenderPool {
    * @param {Number} newSize - 新的池大小
    */
   async resize(newSize) {
-    newSize = Math.max(1, Math.min(newSize, 10));
+    newSize = Math.max(1, Math.min(newSize, 100));
     
     if (newSize === this.poolSize) {
       console.log('[RenderPool] 池大小未改变');
