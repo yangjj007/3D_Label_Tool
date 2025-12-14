@@ -691,6 +691,7 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
     try {
       await renderPool.initialize();
       console.log(`[批量打标] 渲染池初始化成功，池大小: ${poolSize}`);
+      renderPool.printStatus(); // 打印初始状态
     } catch (error) {
       console.error('[批量打标] 渲染池初始化失败，降级到传统模式:', error);
       renderPool = null;
@@ -705,8 +706,10 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
   const activeWorkers = Array(concurrency).fill(null);
 
   const processFile = async (file) => {
+    const fileStartTime = Date.now();
     console.log(`[批量打标] 开始处理文件: ${file.name}`);
     let offscreenRenderer = null;
+    let acquireStartTime = 0;
     
     try {
       file.status = 'processing';
@@ -719,21 +722,38 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
       if (renderPool) {
         console.log(`[批量打标] 使用离屏渲染模式处理`);
         
-        // 1. 获取渲染器
+        // 1. 获取渲染器（增加超时时间和日志）
         console.log(`[批量打标] 等待获取离屏渲染器...`);
-        offscreenRenderer = await renderPool.acquire();
-        console.log(`[批量打标] 已获取离屏渲染器`);
+        acquireStartTime = Date.now();
+        renderPool.printStatus(); // 打印当前池状态
+        
+        // 增加超时时间到5分钟
+        offscreenRenderer = await renderPool.acquire(300000);
+        const acquireTime = Date.now() - acquireStartTime;
+        console.log(`[批量打标] 已获取离屏渲染器 (等待时间: ${acquireTime}ms)`);
         
         try {
           // 2. 加载模型
           console.log(`[批量打标] 开始加载模型...`);
+          const loadStartTime = Date.now();
+          
           const fileData = await getModelFile(file.id);
           if (!fileData || !fileData.fileBlob) {
             throw new Error("无法获取文件数据");
           }
           
-          await offscreenRenderer.loadModel(fileData.fileBlob, file.name);
-          console.log(`[批量打标] 模型加载成功`);
+          // 添加模型加载超时控制（3分钟）
+          const loadTimeout = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('模型加载超时（3分钟）')), 180000)
+          );
+          
+          await Promise.race([
+            offscreenRenderer.loadModel(fileData.fileBlob, file.name),
+            loadTimeout
+          ]);
+          
+          const loadTime = Date.now() - loadStartTime;
+          console.log(`[批量打标] 模型加载成功 (耗时: ${loadTime}ms)`);
           
           // 3. 获取材质列表并截图
           const materials = offscreenRenderer.getMaterialList();
@@ -792,8 +812,20 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
       const requests = images.map(imgs => [selectPrompt(), imgs, {}]);
       
       console.log(`[批量打标] 开始调用 VLM API...`);
-      const results = await vlmClient.generateBatch(requests, 4);
-      console.log(`[批量打标] VLM API 调用完成，收到 ${results.length} 个结果`);
+      const vlmStartTime = Date.now();
+      
+      // 添加VLM调用超时控制（5分钟）
+      const vlmTimeout = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('VLM API 调用超时（5分钟）')), 300000)
+      );
+      
+      const results = await Promise.race([
+        vlmClient.generateBatch(requests, 4),
+        vlmTimeout
+      ]);
+      
+      const vlmTime = Date.now() - vlmStartTime;
+      console.log(`[批量打标] VLM API 调用完成，收到 ${results.length} 个结果 (耗时: ${vlmTime}ms)`);
       
       const batchResults = results.map((res, idx) => ({
         ...res,
@@ -858,23 +890,36 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
       fileStore.addOrUpdateFile({ ...file, status: 'done', hasLabels: true });
       
     } catch (error) {
-      console.error(`[批量打标] ❌ 文件 ${file.name} 处理失败:`, error);
+      const fileProcessTime = Date.now() - fileStartTime;
+      console.error(`[批量打标] ❌ 文件 ${file.name} 处理失败 (已耗时: ${fileProcessTime}ms):`, error);
       if (error && error.stack) {
         console.error(`[批量打标] 错误堆栈:`, error.stack);
       }
+      
+      // 特别标记超时错误
+      if (error?.message?.includes('timeout') || error?.message?.includes('超时')) {
+        console.error(`[批量打标] ⚠️ 超时错误，可能需要增加超时时间或优化处理流程`);
+      }
+      
       ElMessage.error(`文件 ${file.name} 处理失败: ${error?.message || error || '未知错误'}`);
       file.status = 'error';
       fileStore.addOrUpdateFile({ ...file, status: 'error' });
     } finally {
+      const fileProcessTime = Date.now() - fileStartTime;
+      
       // 释放渲染器
       if (offscreenRenderer && renderPool) {
+        console.log(`[批量打标] 准备释放离屏渲染器...`);
         renderPool.release(offscreenRenderer);
-        console.log(`[批量打标] 已释放离屏渲染器`);
+        console.log(`[批量打标] ✓ 已释放离屏渲染器`);
+        renderPool.printStatus(); // 打印释放后的池状态
+      } else if (renderPool) {
+        console.warn(`[批量打标] ⚠️ 渲染器未被获取，跳过释放`);
       }
       
       processedCount.value++;
       updateProgress();
-      console.log(`[批量打标] 进度: ${processedCount.value}/${totalCount.value}`);
+      console.log(`[批量打标] 进度: ${processedCount.value}/${totalCount.value}, 文件 ${file.name} 总耗时: ${fileProcessTime}ms`);
     }
   };
 
@@ -902,11 +947,25 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
 
   await Promise.all(activeWorkers.map(() => runWorker()));
 
+  // 批处理完成，打印统计信息
+  const batchEndTime = Date.now();
+  const totalTime = batchEndTime - batchStartTime.value;
+  const avgTimePerFile = totalTime / processedCount.value;
+  
+  console.log('[批量打标] ========== 批次处理完成 ==========');
+  console.log(`[批量打标] 总文件数: ${totalCount.value}`);
+  console.log(`[批量打标] 已处理: ${processedCount.value}`);
+  console.log(`[批量打标] 总耗时: ${Math.round(totalTime / 1000)}秒`);
+  console.log(`[批量打标] 平均每文件: ${Math.round(avgTimePerFile / 1000)}秒`);
+
   // 清理渲染池
   if (renderPool) {
-    console.log('[批量打标] 清理渲染池...');
-    await renderPool.cleanup();
+    console.log('[批量打标] 最终渲染池状态:');
     renderPool.printStatus();
+    
+    console.log('[批量打标] 开始清理渲染池...');
+    await renderPool.cleanup();
+    console.log('[批量打标] 渲染池清理完成');
     renderPool = null;
   }
 
