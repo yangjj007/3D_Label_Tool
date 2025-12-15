@@ -4,7 +4,17 @@ import { ChunkedDownloader } from './chunkedDownload';
 import { saveModelFile, deleteModelFile, listFolderFiles } from './filePersistence';
 import { getFileType } from './utilityFunction';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:30005/api';
+// 强制要求从环境变量读取后端API地址配置
+if (!import.meta.env.VITE_API_BASE_URL) {
+  throw new Error(
+    '❌ 错误: 未设置环境变量 VITE_API_BASE_URL\n' +
+    '请在项目根目录创建 .env 文件并配置:\n' +
+    'VITE_API_BASE_URL=http://localhost:30005/api\n' +
+    '或根据实际服务器地址配置，例如:\n' +
+    'VITE_API_BASE_URL=http://10.26.2.3:30005/api'
+  );
+}
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL; 
 
 /**
  * 获取服务器文件列表（分页）

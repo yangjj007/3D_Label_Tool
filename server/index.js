@@ -5,7 +5,16 @@ const fs = require('fs');
 const cors = require('cors');
 
 const app = express();
-const PORT = process.env.PORT || 30005;
+
+// 强制要求从环境变量读取端口配置
+if (!process.env.PORT) {
+  console.error('❌ 错误: 未设置环境变量 PORT');
+  console.error('请在启动前设置 PORT 环境变量，例如:');
+  console.error('  export PORT=30005');
+  console.error('  或在 .env 文件中配置 PORT=30005');
+  process.exit(1);
+}
+const PORT = process.env.PORT;
 
 // 配置中间件
 app.use(cors());
