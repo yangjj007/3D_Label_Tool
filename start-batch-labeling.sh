@@ -26,12 +26,16 @@ RED='\033[0;31m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+server_port=9999  #前端服务端口
+api_port=10000  #后端服务端口
+chrome_debug_port=30000  #Chrome调试端口
+
 # 配置
-export SERVER_URL="${SERVER_URL:-http://localhost:29999}"
-export API_URL="${API_URL:-http://localhost:30005}"
+export SERVER_URL="${SERVER_URL:-http://localhost:$server_port}"
+export API_URL="${API_URL:-http://localhost:$api_port}"
 export CONCURRENCY="${CONCURRENCY:-16}"
 export VIEW_KEYS="${VIEW_KEYS:-axial}"
-export CHROME_DEBUG_PORT="${CHROME_DEBUG_PORT:-30000}"
+export CHROME_DEBUG_PORT="${CHROME_DEBUG_PORT:-$chrome_debug_port}"
 
 # 获取项目目录
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -152,7 +156,7 @@ log_success "依赖检查通过"
 log_step "1/4" "检查后端服务..."
 
 # 为了确保后端工作目录正确，总是重启后端
-if check_port 30005; then
+if check_port $api_port; then
     log_info "后端服务已运行，为确保工作目录正确，将重启服务..."
     
     # 尝试停止现有服务
@@ -188,7 +192,7 @@ else
 fi
 
 # 等待后端启动
-if wait_for_port 30005 "后端服务"; then
+if wait_for_port $api_port "后端服务"; then
     log_success "后端服务启动成功"
 else
     log_error "后端服务启动失败，请查看日志: logs/server.log"
@@ -198,7 +202,7 @@ fi
 # 2. 检查并启动前端服务
 log_step "2/4" "检查前端服务..."
 
-if check_port 29999; then
+if check_port $server_port; then
     log_success "前端服务已运行"
 else
     log_info "前端未运行，正在启动..."
@@ -216,21 +220,21 @@ else
     # 启动前端预览服务
     if command -v pm2 &> /dev/null; then
         if command -v pnpm &> /dev/null; then
-            pm2 start --name "3d-label-frontend" -- pnpm preview --host 0.0.0.0 --port 29999 --silent
+            pm2 start --name "3d-label-frontend" -- pnpm preview --host 0.0.0.0 --port $server_port --silent
         else
-            pm2 start --name "3d-label-frontend" -- npm run preview -- --host 0.0.0.0 --port 29999 --silent
+            pm2 start --name "3d-label-frontend" -- npm run preview -- --host 0.0.0.0 --port $server_port --silent
         fi
     else
         if command -v pnpm &> /dev/null; then
-            nohup pnpm preview --host 0.0.0.0 --port 29999 > logs/frontend.log 2>&1 &
+            nohup pnpm preview --host 0.0.0.0 --port $server_port > logs/frontend.log 2>&1 &
         else
-            nohup npm run preview -- --host 0.0.0.0 --port 29999 > logs/frontend.log 2>&1 &
+            nohup npm run preview -- --host 0.0.0.0 --port $server_port > logs/frontend.log 2>&1 &
         fi
         echo $! > .frontend.pid
     fi
     
     # 等待前端启动
-    if wait_for_port 29999 "前端服务"; then
+    if wait_for_port $server_port "前端服务"; then
         log_success "前端服务启动成功"
     else
         log_error "前端服务启动失败"
