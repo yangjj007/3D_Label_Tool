@@ -41,18 +41,28 @@
 - 实时监控处理进度
 - 生成详细报告
 
-### 2. start-batch-labeling.sh
+### 2. configure-vlm-api.js
+VLM API配置和测试工具：
+- 交互式配置API参数（地址、密钥、模型）
+- 测试API连通性
+- 保存配置到 `vlm-config.json`
+- 输出详细的测试结果和错误信息
+
+### 3. start-batch-labeling.sh
 一键启动脚本，自动执行：
 1. 检查并启动后端服务（端口30005）
 2. 检查并启动前端服务（端口29999）
 3. 检查并启动Chrome浏览器（调试端口30000）
 4. 运行批量打标自动化脚本
 
-### 3. stop-all.sh
+### 4. stop-all.sh
 停止所有服务的脚本：
 - 停止后端、前端、Chrome
 - 清理临时文件和进程
 - 清理Chrome缓存数据
+
+### 5. show-vlm-config.sh
+查看当前VLM API配置和测试状态
 
 ## 快速开始
 
@@ -75,6 +85,37 @@ pnpm install
 
 # 构建前端
 pnpm build:pro
+```
+
+### 配置VLM API（首次使用必须）
+
+在运行批量打标前，需要先配置VLM API：
+
+```bash
+# 交互式配置（推荐）
+bash configure-vlm-api.sh
+# 或
+pnpm config-vlm
+
+# 非交互式配置
+VLM_API_URL=https://api.openai.com/v1 \
+VLM_API_KEY=sk-xxxxx \
+VLM_MODEL=gpt-4-vision-preview \
+bash configure-vlm-api.sh --auto
+```
+
+配置脚本会：
+1. 提示输入API地址、密钥和模型名称
+2. 自动测试连通性
+3. 显示详细的测试结果（响应时间、状态码、错误信息）
+4. 保存配置到 `vlm-config.json`
+
+**查看当前配置：**
+
+```bash
+bash show-vlm-config.sh
+# 或
+pnpm show-config
 ```
 
 ### 运行批量打标

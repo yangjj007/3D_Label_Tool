@@ -17,6 +17,8 @@
     "batch-label": "node automation/batch-labeling.js",
     "start-batch": "bash start-batch-labeling.sh",
     "stop-all": "bash stop-all.sh",
+    "config-vlm": "node automation/configure-vlm-api.js",
+    "show-config": "bash show-vlm-config.sh",
     "test:e2e": "vue-cli-service test:e2e",
     "lint:lint-staged": "lint-staged",
     "prepare": "husky install"

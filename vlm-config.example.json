@@ -1,0 +1,8 @@
+{
+  "baseUrl": "https://api.openai.com/v1",
+  "apiKey": "sk-your-api-key-here",
+  "modelName": "gpt-4-vision-preview",
+  "lastTested": "2025-01-15T10:00:00.000Z",
+  "testPassed": false
+}
+

@@ -31,6 +31,9 @@ logs/
 automation/*.pid
 /tmp/chrome-batch-labeling
 
+# VLM API配置（包含敏感信息）
+vlm-config.json
+
 # Editor directories and files
 .idea
 .vscode
