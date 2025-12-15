@@ -16,8 +16,17 @@ if (!process.env.PORT) {
 }
 const PORT = process.env.PORT;
 
+// 配置CORS - 允许所有来源（开发环境）
+// 生产环境建议配置具体的允许来源
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Range'],
+  exposedHeaders: ['Content-Range', 'Accept-Ranges', 'Content-Length'],
+  credentials: false
+}));
+
 // 配置中间件
-app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 

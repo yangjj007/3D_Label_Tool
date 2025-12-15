@@ -1,6 +1,14 @@
 import axios from 'axios';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:30005/api';
+// 强制要求从环境变量读取后端API地址配置
+if (!import.meta.env.VITE_API_BASE_URL) {
+  throw new Error(
+    '❌ 错误: 未设置环境变量 VITE_API_BASE_URL\n' +
+    '请在项目根目录创建 .env 文件并配置:\n' +
+    'VITE_API_BASE_URL=http://localhost:10000/api'
+  );
+}
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL;
 const CHUNK_SIZE = parseInt(import.meta.env.VITE_CHUNK_SIZE) || 10 * 1024 * 1024; // 10MB 默认
 
 /**

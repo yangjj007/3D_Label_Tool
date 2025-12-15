@@ -10,6 +10,8 @@
     "serve": "vite",
     "server": "node server/index.js",
     "dev:full": "concurrently \"npm run serve\" \"npm run server\"",
+    "start": "bash start-dev.sh",
+    "start:win": "start-dev.bat",
     "preview": "vite preview",
     "build": "vite build --mode development",
     "build:pro": "vite build --mode production",
