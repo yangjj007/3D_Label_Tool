@@ -48,9 +48,21 @@ nohup google-chrome \
   --disable-extensions \
   --no-first-run \
   --mute-audio \
-  --js-flags="--max-old-space-size=4096" \
+  --disable-web-security \
+  --disable-features=IsolateOrigins,site-per-process \
+  --disable-blink-features=AutomationControlled \
+  --disable-infobars \
+  --disable-background-timer-throttling \
+  --disable-backgrounding-occluded-windows \
+  --disable-renderer-backgrounding \
+  --disable-breakpad \
+  --disable-component-extensions-with-background-pages \
+  --disable-features=TranslateUI,BlinkGenPropertyTrees \
+  --js-flags="--max-old-space-size=8192" \
   --enable-logging=stderr \
   --v=1 \
+  --single-process \
+  --no-zygote \
   http://localhost:$SERVER_PORT \
   > logs/chrome.log 2>&1 &
 

@@ -1,5 +1,22 @@
 # 批量打标 - 快速开始指南
 
+## ⚠️ WebGL 上下文丢失问题？
+
+如果遇到以下错误：
+```
+⚠️ WebGL: CONTEXT_LOST_WEBGL: loseContext: context lost
+❌ WebGL 不可用!
+```
+
+**立即运行：**
+```bash
+bash restart-with-fix.sh
+```
+
+详细修复指南：`WEBGL_CONTEXT_LOST_FIX.md`
+
+---
+
 ## 🚀 一键启动（推荐）
 
 ```bash

@@ -30,10 +30,10 @@ server_port=9999  #前端服务端口
 api_port=10000  #后端服务端口
 chrome_debug_port=30000  #Chrome调试端口
 
-# 配置
+# 配置 - 默认使用保守的并发数以避免 WebGL 上下文丢失
 export SERVER_URL="${SERVER_URL:-http://localhost:$server_port}"
 export API_URL="${API_URL:-http://localhost:$api_port}"
-export CONCURRENCY="${CONCURRENCY:-16}"
+export CONCURRENCY="${CONCURRENCY:-2}"  # 默认并发数改为 2（适用于 SwiftShader）
 export VIEW_KEYS="${VIEW_KEYS:-axial}"
 export CHROME_DEBUG_PORT="${CHROME_DEBUG_PORT:-$chrome_debug_port}"
 
@@ -124,6 +124,28 @@ echo "  后端地址: $API_URL"
 echo "  并发数: $CONCURRENCY"
 echo "  视图配置: $VIEW_KEYS"
 echo "  Chrome调试端口: $CHROME_DEBUG_PORT"
+echo ""
+
+# 并发数警告
+if [ "$CONCURRENCY" -gt 4 ]; then
+    log_error "⚠️  警告：并发数 $CONCURRENCY 可能过高！"
+    log_info "   如果使用 SwiftShader（CPU 软件渲染），高并发会导致："
+    log_info "   - WebGL 上下文丢失"
+    log_info "   - 内存不足"
+    log_info "   - 批量打标失败"
+    log_info ""
+    log_info "   建议："
+    log_info "   - SwiftShader 模式: CONCURRENCY=1-2"
+    log_info "   - GPU 模式: CONCURRENCY=8-16"
+    log_info ""
+    read -p "   是否继续？(y/N) " -n 1 -r
+    echo ""
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        log_info "已取消，请设置合适的并发数："
+        log_info "   CONCURRENCY=2 bash start-batch-labeling.sh"
+        exit 0
+    fi
+fi
 echo ""
 
 # 检查必要的命令

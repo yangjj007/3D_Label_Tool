@@ -319,17 +319,53 @@ class BatchLabelingAutomation {
       
       console.log('⏳ 等待应用加载...');
       
-      // 检查 WebGL 支持
+      // 等待一下让页面稳定
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      
+      // 检查 WebGL 支持（在页面加载后检查）
       console.log('🔍 检查 WebGL 支持...');
       const webglInfo = await this.page.evaluate(() => {
         try {
           const canvas = document.createElement('canvas');
-          const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+          
+          // 添加 WebGL 上下文丢失/恢复监听
+          let contextLost = false;
+          canvas.addEventListener('webglcontextlost', (e) => {
+            console.error('[WebGL] 上下文丢失事件触发');
+            contextLost = true;
+            e.preventDefault(); // 阻止默认行为，允许恢复
+          });
+          
+          canvas.addEventListener('webglcontextrestored', () => {
+            console.log('[WebGL] 上下文已恢复');
+            contextLost = false;
+          });
+          
+          const gl = canvas.getContext('webgl', {
+            failIfMajorPerformanceCaveat: false,  // 即使性能差也继续
+            preserveDrawingBuffer: true,          // 保留绘制缓冲区
+            antialias: false,                     // 禁用抗锯齿以节省资源
+            powerPreference: 'high-performance'   // 优先性能
+          }) || canvas.getContext('experimental-webgl', {
+            failIfMajorPerformanceCaveat: false,
+            preserveDrawingBuffer: true,
+            antialias: false,
+            powerPreference: 'high-performance'
+          });
           
           if (!gl) {
             return {
               supported: false,
               error: 'WebGL context is null'
+            };
+          }
+          
+          // 检查上下文是否立即丢失
+          if (gl.isContextLost()) {
+            return {
+              supported: false,
+              error: 'WebGL context lost immediately after creation',
+              contextLost: true
             };
           }
           
@@ -341,7 +377,8 @@ class BatchLabelingAutomation {
             version: gl.getParameter(gl.VERSION),
             shadingLanguageVersion: gl.getParameter(gl.SHADING_LANGUAGE_VERSION),
             maxTextureSize: gl.getParameter(gl.MAX_TEXTURE_SIZE),
-            maxViewportDims: gl.getParameter(gl.MAX_VIEWPORT_DIMS)
+            maxViewportDims: gl.getParameter(gl.MAX_VIEWPORT_DIMS),
+            contextLost: contextLost
           };
         } catch (e) {
           return {
@@ -543,14 +580,54 @@ class BatchLabelingAutomation {
     let lastProcessed = 0;
     let lastCheckTime = Date.now();
     let noProgressCount = 0;
+    let waitCount = 0;
 
     while (true) {
       await new Promise(resolve => setTimeout(resolve, this.config.checkInterval));
 
       try {
+        // 首先检查 WebGL 上下文状态
+        const webglStatus = await this.page.evaluate(() => {
+          // 检查 Three.js 渲染器状态
+          if (window.__THREE_RENDERER__) {
+            const gl = window.__THREE_RENDERER__.getContext();
+            return {
+              hasRenderer: true,
+              contextLost: gl ? gl.isContextLost() : true
+            };
+          }
+          return { hasRenderer: false, contextLost: false };
+        });
+        
+        if (webglStatus.hasRenderer && webglStatus.contextLost) {
+          console.log('│ ❌ WebGL 上下文已丢失，等待恢复...                    │');
+          
+          // 等待最多 30 秒让上下文恢复
+          if (waitCount < 3) {
+            waitCount++;
+            continue;
+          } else {
+            throw new Error('WebGL 上下文丢失且无法恢复，请重启 Chrome');
+          }
+        }
+        
+        waitCount = 0; // 重置等待计数
+        
         const status = await this.page.evaluate(() => {
           const app = window.__VUE_APP__;
-          if (!app) return null;
+          
+          // 调试信息：检查各种状态源
+          const debug = {
+            hasVueApp: !!app,
+            hasProxy: !!app?.proxy,
+            hasBatchStatus: !!window.__BATCH_STATUS__,
+            batchStatusValue: window.__BATCH_STATUS__,
+            proxyKeys: app?.proxy ? Object.keys(app.proxy).filter(k => k.includes('batch') || k.includes('process') || k.includes('count')) : []
+          };
+          
+          console.log('[Monitor Debug]', JSON.stringify(debug, null, 2));
+          
+          if (!app) return { error: 'no_vue_app', debug };
           
           // 尝试从多个来源获取状态
           const proxy = app?.proxy;
@@ -560,26 +637,75 @@ class BatchLabelingAutomation {
             return {
               processed: proxy.processedCount || 0,
               total: proxy.totalCount || 0,
-              isProcessing: proxy.isBatchProcessing || false
+              isProcessing: proxy.isBatchProcessing || false,
+              source: 'vue_proxy'
             };
           }
           
           // 方式2: 从全局状态获取
           if (window.__BATCH_STATUS__) {
-            return window.__BATCH_STATUS__;
+            return {
+              ...window.__BATCH_STATUS__,
+              source: 'global_status'
+            };
           }
           
-          return null;
+          // 方式3: 尝试直接从组件实例获取
+          if (app?.$children) {
+            // 递归查找包含批量处理状态的组件
+            function findBatchComponent(component) {
+              if (component.isBatchProcessing !== undefined) {
+                return {
+                  processed: component.processedCount || 0,
+                  total: component.totalCount || 0,
+                  isProcessing: component.isBatchProcessing || false
+                };
+              }
+              if (component.$children) {
+                for (const child of component.$children) {
+                  const result = findBatchComponent(child);
+                  if (result) return result;
+                }
+              }
+              return null;
+            }
+            
+            const result = findBatchComponent(app);
+            if (result) {
+              return { ...result, source: 'component_search' };
+            }
+          }
+          
+          return { error: 'no_status', debug };
         });
 
         const now = Date.now();
 
-        if (!status) {
-          console.log('│ ⚠️  无法获取状态信息，继续等待...                      │');
-          continue;
+        if (status.error) {
+          console.log(`│ ⚠️  无法获取状态: ${status.error.padEnd(35)}│`);
+          
+          // 显示调试信息
+          if (status.debug) {
+            console.log(`│    Vue App: ${status.debug.hasVueApp ? '✅' : '❌'}, Proxy: ${status.debug.hasProxy ? '✅' : '❌'}           │`);
+            console.log(`│    Global Status: ${status.debug.hasBatchStatus ? '✅' : '❌'}${' '.repeat(30)}│`);
+            if (status.debug.proxyKeys && status.debug.proxyKeys.length > 0) {
+              console.log(`│    Found keys: ${status.debug.proxyKeys.join(', ').substring(0, 35).padEnd(35)}│`);
+            }
+          }
+          
+          // 如果持续无法获取状态，可能是批量打标还未真正开始
+          if (noProgressCount < 6) { // 等待最多 1 分钟
+            noProgressCount++;
+            continue;
+          } else {
+            throw new Error('长时间无法获取批量打标状态，可能批量打标未正确启动');
+          }
         }
 
-        const { processed, total, isProcessing } = status;
+        // 重置无进度计数（成功获取到状态）
+        noProgressCount = 0;
+        
+        const { processed, total, isProcessing, source } = status;
 
         // 更新统计
         this.stats.processed = processed;
@@ -593,10 +719,11 @@ class BatchLabelingAutomation {
           ? ((total - processed) * avgTime).toFixed(1) 
           : '???';
 
-        // 显示进度
+        // 显示进度（包含状态来源）
         const progressBar = this.getProgressBar(processed, total, 30);
+        const sourceLabel = source ? `[${source}]` : '';
         console.log(`│ ${progressBar} ${percent.padStart(5)}% │`);
-        console.log(`│ 进度: ${processed}/${total} | 耗时: ${elapsed}min | 预计剩余: ${eta}min${''.padEnd(10)}│`);
+        console.log(`│ 进度: ${processed}/${total} | 耗时: ${elapsed}min | ETA: ${eta}min ${sourceLabel.padEnd(8)}│`);
         console.log('├─────────────────────────────────────────────────────────┤');
 
         // 检查是否完成
@@ -613,11 +740,9 @@ class BatchLabelingAutomation {
           if (noProgressTime > this.config.maxNoProgressTime) {
             throw new Error(`进度超过${this.config.maxNoProgressTime / 60000}分钟无变化，可能已卡死`);
           }
-          noProgressCount++;
         } else {
           lastProcessed = processed;
           lastCheckTime = now;
-          noProgressCount = 0;
         }
 
         // 移动光标回到表格顶部继续刷新
