@@ -103,19 +103,35 @@ class BatchLabelingAutomation {
     try {
       // 获取浏览器WebSocket地址
       const debugUrl = `http://localhost:${this.config.chromeDebugPort}/json/version`;
+      console.log(`🔍 调试URL: ${debugUrl}`);
       
       const response = await new Promise((resolve, reject) => {
         const req = http.get(debugUrl, (res) => {
           let data = '';
           res.on('data', chunk => data += chunk);
-          res.on('end', () => resolve(JSON.parse(data)));
+          res.on('end', () => {
+            try {
+              resolve(JSON.parse(data));
+            } catch (e) {
+              reject(new Error(`解析响应失败: ${e.message}`));
+            }
+          });
         });
-        req.on('error', reject);
+        req.on('error', (err) => {
+          reject(new Error(`HTTP请求失败: ${err.message}`));
+        });
         req.setTimeout(5000, () => {
           req.destroy();
           reject(new Error('连接超时'));
         });
       });
+      
+      // 显示浏览器信息
+      console.log('📊 浏览器信息:');
+      console.log(`   产品: ${response['Product'] || 'Unknown'}`);
+      console.log(`   用户代理: ${response['User-Agent'] || 'Unknown'}`);
+      console.log(`   V8版本: ${response['V8-Version'] || 'Unknown'}`);
+      console.log(`   WebKit版本: ${response['WebKit-Version'] || 'Unknown'}`);
       
       const browserWSEndpoint = response.webSocketDebuggerUrl;
       
@@ -131,24 +147,51 @@ class BatchLabelingAutomation {
         defaultViewport: null
       });
       
+      console.log('✅ 已通过 Puppeteer 连接到浏览器');
+      
+      // 获取浏览器版本信息
+      const version = await this.browser.version();
+      console.log('🔍 浏览器版本:', version);
+      
       // 获取或创建页面
       const pages = await this.browser.pages();
+      console.log(`📄 当前打开的页面数: ${pages.length}`);
+      
       this.page = pages.length > 0 ? pages[0] : await this.browser.newPage();
       
       // 设置视口
       await this.page.setViewport({ width: 1920, height: 1080 });
+      console.log('📐 视口设置: 1920x1080');
       
       // 禁用超时（批量处理可能很长）
       this.page.setDefaultTimeout(0);
       this.page.setDefaultNavigationTimeout(60000);
       
-      console.log('✅ 已连接到Chrome实例');
+      // 获取Chrome启动参数（如果可能）
+      console.log('🔍 尝试获取 Chrome 启动参数...');
+      try {
+        const cmdLine = await this.page.evaluate(() => {
+          return navigator.userAgent;
+        });
+        console.log('   User Agent:', cmdLine);
+      } catch (e) {
+        console.log('   无法获取启动参数');
+      }
+      
+      console.log('✅ 已连接到Chrome实例\n');
     } catch (error) {
       console.error('❌ 连接Chrome失败:', error.message);
       console.log('\n💡 请确保Chrome已通过以下命令启动:');
       console.log('   bash start_chrome_swiftshader.sh');
       console.log('   或');
       console.log('   bash start_chrome_xvfb.sh');
+      console.log('\n🔍 故障排除:');
+      console.log('   1. 检查 Chrome 进程是否运行:');
+      console.log(`      ps aux | grep "remote-debugging-port=${this.config.chromeDebugPort}"`);
+      console.log('   2. 检查端口是否可访问:');
+      console.log(`      curl http://localhost:${this.config.chromeDebugPort}/json/version`);
+      console.log('   3. 查看 Chrome 启动日志:');
+      console.log('      tail -f logs/chrome.log');
       throw error;
     }
   }
@@ -157,29 +200,109 @@ class BatchLabelingAutomation {
    * 设置页面监听器
    */
   setupPageListeners() {
+    // 存储所有控制台日志
+    const allConsoleLogs = [];
+    
     // 监听控制台日志
     this.page.on('console', msg => {
       const text = msg.text();
-      // 只输出关键日志
-      if (text.includes('[批量打标]') || 
-          text.includes('[Global API]') ||
-          text.includes('ERROR') ||
-          text.includes('WARN')) {
-        const type = msg.type();
-        const prefix = type === 'error' ? '❌' : type === 'warning' ? '⚠️' : '📄';
-        console.log(`${prefix} [浏览器] ${text}`);
+      const type = msg.type();
+      
+      // 存储日志
+      allConsoleLogs.push(`[${type}] ${text}`);
+      if (allConsoleLogs.length > 100) {
+        allConsoleLogs.shift(); // 只保留最后100条
       }
+      
+      // 输出所有日志（不再过滤）
+      const prefix = type === 'error' ? '❌' : 
+                    type === 'warning' ? '⚠️' : 
+                    type === 'info' ? 'ℹ️' : 
+                    type === 'debug' ? '🐛' : '📄';
+      console.log(`${prefix} [浏览器-${type}] ${text}`);
     });
 
     // 监听页面错误
     this.page.on('pageerror', error => {
-      console.error('❌ [浏览器错误]', error.message);
+      console.error('❌ [浏览器页面错误]', error.message);
+      console.error('   堆栈:', error.stack?.substring(0, 500));
+      allConsoleLogs.push(`[pageerror] ${error.message}`);
     });
 
     // 监听请求失败
     this.page.on('requestfailed', request => {
-      console.warn('⚠️  [请求失败]', request.url(), request.failure()?.errorText);
+      const url = request.url();
+      const failure = request.failure();
+      
+      // 忽略百度统计等第三方请求失败
+      if (url.includes('hm.baidu.com') || url.includes('google-analytics')) {
+        return;
+      }
+      
+      console.warn('⚠️  [请求失败]', url);
+      console.warn('   错误:', failure?.errorText);
+      allConsoleLogs.push(`[requestfailed] ${url}: ${failure?.errorText}`);
     });
+    
+    // 监听请求
+    this.page.on('request', request => {
+      const url = request.url();
+      // 只记录 API 请求
+      if (url.includes('/api/')) {
+        console.log(`🌐 [请求] ${request.method()} ${url}`);
+      }
+    });
+    
+    // 监听响应
+    this.page.on('response', async response => {
+      const url = response.url();
+      const status = response.status();
+      
+      // 只记录 API 响应
+      if (url.includes('/api/')) {
+        const statusEmoji = status >= 200 && status < 300 ? '✅' : 
+                           status >= 400 ? '❌' : '⚠️';
+        console.log(`${statusEmoji} [响应] ${status} ${url}`);
+        
+        // 如果是错误响应，尝试输出响应体
+        if (status >= 400) {
+          try {
+            const text = await response.text();
+            console.log(`   响应体: ${text.substring(0, 200)}`);
+          } catch (e) {
+            // 忽略
+          }
+        }
+      }
+    });
+    
+    // 将日志暴露给页面（用于错误诊断）
+    this.page.evaluateOnNewDocument(() => {
+      window.__consoleLogs__ = [];
+      const originalLog = console.log;
+      const originalError = console.error;
+      const originalWarn = console.warn;
+      
+      console.log = function(...args) {
+        window.__consoleLogs__.push('[log] ' + args.join(' '));
+        if (window.__consoleLogs__.length > 100) window.__consoleLogs__.shift();
+        originalLog.apply(console, args);
+      };
+      
+      console.error = function(...args) {
+        window.__consoleLogs__.push('[error] ' + args.join(' '));
+        if (window.__consoleLogs__.length > 100) window.__consoleLogs__.shift();
+        originalError.apply(console, args);
+      };
+      
+      console.warn = function(...args) {
+        window.__consoleLogs__.push('[warn] ' + args.join(' '));
+        if (window.__consoleLogs__.length > 100) window.__consoleLogs__.shift();
+        originalWarn.apply(console, args);
+      };
+    });
+    
+    console.log('✅ 页面监听器已设置\n');
   }
 
   /**
@@ -196,15 +319,106 @@ class BatchLabelingAutomation {
       
       console.log('⏳ 等待应用加载...');
       
+      // 检查 WebGL 支持
+      console.log('🔍 检查 WebGL 支持...');
+      const webglInfo = await this.page.evaluate(() => {
+        try {
+          const canvas = document.createElement('canvas');
+          const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+          
+          if (!gl) {
+            return {
+              supported: false,
+              error: 'WebGL context is null'
+            };
+          }
+          
+          const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
+          return {
+            supported: true,
+            vendor: gl.getParameter(gl.VENDOR),
+            renderer: debugInfo ? gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) : 'Unknown',
+            version: gl.getParameter(gl.VERSION),
+            shadingLanguageVersion: gl.getParameter(gl.SHADING_LANGUAGE_VERSION),
+            maxTextureSize: gl.getParameter(gl.MAX_TEXTURE_SIZE),
+            maxViewportDims: gl.getParameter(gl.MAX_VIEWPORT_DIMS)
+          };
+        } catch (e) {
+          return {
+            supported: false,
+            error: e.message
+          };
+        }
+      });
+      
+      if (!webglInfo.supported) {
+        console.error('❌ WebGL 不可用!');
+        console.error('   错误:', webglInfo.error);
+        console.error('\n💡 可能的解决方案:');
+        console.error('   1. 确保 Chrome 启动时使用了 --use-gl=swiftshader 或 --use-gl=angle');
+        console.error('   2. 检查 start_chrome_swiftshader.sh 脚本是否正确执行');
+        console.error('   3. 确认没有使用 --disable-webgl 参数');
+      } else {
+        console.log('✅ WebGL 可用');
+        console.log(`   供应商: ${webglInfo.vendor}`);
+        console.log(`   渲染器: ${webglInfo.renderer}`);
+        console.log(`   版本: ${webglInfo.version}`);
+        console.log(`   着色语言版本: ${webglInfo.shadingLanguageVersion}`);
+        console.log(`   最大纹理尺寸: ${webglInfo.maxTextureSize}`);
+        console.log(`   最大视口尺寸: ${webglInfo.maxViewportDims}`);
+      }
+      
+      // 检查 Three.js 是否加载
+      console.log('🔍 检查 Three.js...');
+      const threeInfo = await this.page.evaluate(() => {
+        if (typeof THREE !== 'undefined') {
+          return {
+            loaded: true,
+            version: THREE.REVISION
+          };
+        }
+        return { loaded: false };
+      });
+      
+      if (threeInfo.loaded) {
+        console.log(`✅ Three.js 已加载 (版本: r${threeInfo.version})`);
+      } else {
+        console.warn('⚠️  Three.js 未检测到');
+      }
+      
       // 等待Vue应用加载完成
+      console.log('🔍 等待 Vue 应用初始化...');
       await this.page.waitForFunction(() => {
         return window.__VUE_APP__ !== undefined;
       }, { timeout: 30000 });
       
-      // 额外等待一下确保所有组件都挂载完成
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      console.log('✅ Vue 应用已初始化');
       
-      console.log('✅ 应用加载完成');
+      // 检查前端暴露的 API
+      console.log('🔍 检查前端 API...');
+      const apiInfo = await this.page.evaluate(() => {
+        return {
+          startBatchLabeling: typeof window.startBatchLabeling === 'function',
+          stopBatchLabeling: typeof window.stopBatchLabeling === 'function',
+          getBatchStatus: typeof window.getBatchStatus === 'function'
+        };
+      });
+      
+      console.log('   API 可用性:');
+      console.log(`     - startBatchLabeling: ${apiInfo.startBatchLabeling ? '✅' : '❌'}`);
+      console.log(`     - stopBatchLabeling: ${apiInfo.stopBatchLabeling ? '✅' : '❌'}`);
+      console.log(`     - getBatchStatus: ${apiInfo.getBatchStatus ? '✅' : '❌'}`);
+      
+      if (!apiInfo.startBatchLabeling) {
+        console.error('❌ 批量打标 API 未暴露!');
+        console.error('   请检查前端代码是否正确挂载了 window.startBatchLabeling');
+      }
+      
+      // 额外等待一下确保所有组件都挂载完成
+      console.log('⏳ 等待组件挂载...');
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      
+      console.log('✅ 应用加载完成\n');
     } catch (error) {
       console.error('❌ 应用加载失败:', error.message);
       
@@ -215,6 +429,25 @@ class BatchLabelingAutomation {
         console.log(`📸 错误截图已保存: ${screenshotPath}`);
       } catch (screenshotError) {
         // 忽略截图错误
+      }
+      
+      // 获取页面的控制台日志
+      console.log('\n📋 页面控制台日志（最后10条）:');
+      try {
+        const consoleLogs = await this.page.evaluate(() => {
+          if (window.__consoleLogs__) {
+            return window.__consoleLogs__.slice(-10);
+          }
+          return [];
+        });
+        
+        if (consoleLogs.length > 0) {
+          consoleLogs.forEach(log => console.log('   ', log));
+        } else {
+          console.log('    (无日志记录)');
+        }
+      } catch (e) {
+        console.log('    (无法获取日志)');
       }
       
       throw error;

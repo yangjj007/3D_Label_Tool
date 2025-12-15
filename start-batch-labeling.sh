@@ -183,11 +183,12 @@ if command -v pm2 &> /dev/null; then
     if [ -f "ecosystem.config.js" ]; then
         pm2 start ecosystem.config.js --silent
     else
-        pm2 start server/index.js --name "3d-label-server" --cwd "$PROJECT_DIR" --silent
+        # 没有 ecosystem.config.js，手动设置环境变量
+        PORT=$api_port pm2 start server/index.js --name "3d-label-server" --cwd "$PROJECT_DIR" --silent
     fi
 else
-    # 使用nohup启动
-    nohup node server/index.js > logs/server.log 2>&1 &
+    # 使用nohup启动，必须设置 PORT 环境变量
+    PORT=$api_port nohup node server/index.js > logs/server.log 2>&1 &
     echo $! > .server.pid
 fi
 
@@ -201,6 +202,27 @@ fi
 
 # 2. 检查并启动前端服务
 log_step "2/4" "检查前端服务..."
+
+# 确保 .env 文件存在并配置正确
+log_info "检查前端环境配置..."
+if [ ! -f ".env" ]; then
+    log_info "创建 .env 文件..."
+    cat > .env << EOF
+# 前端API地址配置
+VITE_API_BASE_URL=http://localhost:$api_port/api
+VITE_APP_BASE_URL=/
+EOF
+    log_success ".env 文件已创建"
+else
+    # 检查 .env 文件中的端口是否匹配
+    if ! grep -q "VITE_API_BASE_URL=.*:$api_port/api" .env; then
+        log_info "更新 .env 文件中的API端口..."
+        sed -i.bak "s|VITE_API_BASE_URL=.*|VITE_API_BASE_URL=http://localhost:$api_port/api|" .env
+        log_success ".env 文件已更新"
+        # 端口变了，需要重新构建
+        rm -rf dist
+    fi
+fi
 
 if check_port $server_port; then
     log_success "前端服务已运行"
@@ -252,21 +274,35 @@ else
     
     # 检查启动脚本
     if [ -f "start_chrome_swiftshader.sh" ]; then
-        bash start_chrome_swiftshader.sh
+        log_info "使用 SwiftShader 模式启动 Chrome..."
+        SERVER_PORT=$server_port CHROME_DEBUG_PORT=$chrome_debug_port bash start_chrome_swiftshader.sh
     elif [ -f "start_chrome_xvfb.sh" ]; then
-        bash start_chrome_xvfb.sh
+        log_info "使用 Xvfb 模式启动 Chrome..."
+        SERVER_PORT=$server_port CHROME_DEBUG_PORT=$chrome_debug_port bash start_chrome_xvfb.sh
     else
         log_error "未找到Chrome启动脚本"
+        log_info "请确保 start_chrome_swiftshader.sh 或 start_chrome_xvfb.sh 存在"
         exit 1
     fi
     
     # 等待Chrome启动
-    sleep 5
+    log_info "等待 Chrome 完全启动（10秒）..."
+    sleep 10
     
     if pgrep -f "chrome.*remote-debugging-port=$CHROME_DEBUG_PORT" > /dev/null; then
         log_success "Chrome启动成功"
+        
+        # 验证 Chrome 调试端口
+        log_info "验证 Chrome 调试端口..."
+        if curl -s "http://localhost:$chrome_debug_port/json/version" > /dev/null; then
+            log_success "Chrome 调试端口可访问"
+        else
+            log_error "Chrome 调试端口不可访问，但进程存在"
+            log_info "可能需要更长的启动时间，继续尝试..."
+        fi
     else
         log_error "Chrome启动失败"
+        log_info "请查看日志: tail -f logs/chrome.log"
         exit 1
     fi
 fi
