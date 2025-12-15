@@ -228,14 +228,32 @@ class BatchLabelingAutomation {
     console.log('📊 获取待处理文件总数...');
     
     try {
+      // 尝试获取更大的分页以查看所有文件
       const response = await new Promise((resolve, reject) => {
-        const url = `${this.config.apiUrl}/api/files?type=raw&page=1&pageSize=1`;
+        const url = `${this.config.apiUrl}/api/files?type=raw&page=1&pageSize=100`;
+        console.log(`🔍 请求URL: ${url}`);
         http.get(url, (res) => {
           let data = '';
           res.on('data', chunk => data += chunk);
-          res.on('end', () => resolve(JSON.parse(data)));
+          res.on('end', () => {
+            try {
+              const parsed = JSON.parse(data);
+              resolve(parsed);
+            } catch (e) {
+              reject(new Error(`解析响应失败: ${e.message}, 原始数据: ${data.substring(0, 200)}`));
+            }
+          });
         }).on('error', reject);
       });
+      
+      console.log(`📋 后端返回信息: 总数=${response.total}, 当前页=${response.page}, 文件数=${response.files?.length || 0}`);
+      
+      if (response.files && response.files.length > 0) {
+        console.log(`📄 前3个文件:`);
+        response.files.slice(0, 3).forEach((file, i) => {
+          console.log(`   ${i + 1}. ${file.name} (${(file.size / 1024 / 1024).toFixed(2)}MB, hasLabels=${file.hasLabels})`);
+        });
+      }
       
       return response.total || 0;
     } catch (error) {
@@ -473,7 +491,18 @@ class BatchLabelingAutomation {
       console.log(`📦 待处理文件总数: ${this.stats.total}\n`);
 
       if (this.stats.total === 0) {
-        console.log('ℹ️  没有待处理的文件，任务结束\n');
+        console.log('⚠️  后端返回的待处理文件数为 0\n');
+        console.log('💡 可能的原因和解决方法:');
+        console.log('   1. 检查后端工作目录是否正确');
+        console.log('      - 后端应该从项目根目录启动');
+        console.log('      - 文件应该在: <项目根目录>/files/raw_files/');
+        console.log('   2. 检查后端日志确认文件路径');
+        console.log('      - 查看后端启动时的工作目录');
+        console.log('      - 确认后端能访问 files/raw_files/ 目录');
+        console.log('   3. 尝试重启后端服务');
+        console.log('      - cd <项目根目录>');
+        console.log('      - pm2 restart all  或  node server/index.js\n');
+        console.log('ℹ️  任务结束\n');
         return;
       }
 

@@ -12,11 +12,12 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// 配置存储目录
-const FILES_DIR = path.join(__dirname, '../files');
+// 配置存储目录 - 使用绝对路径
+const PROJECT_ROOT = path.resolve(__dirname, '..');
+const FILES_DIR = path.join(PROJECT_ROOT, 'files');
 const RAW_FILES_DIR = path.join(FILES_DIR, 'raw_files');
 const LABELED_FILES_DIR = path.join(FILES_DIR, 'labeled_files');
-const TEMP_CHUNKS_DIR = path.join(__dirname, '../temp-chunks');
+const TEMP_CHUNKS_DIR = path.join(PROJECT_ROOT, 'temp-chunks');
 
 // 确保目录存在
 [FILES_DIR, RAW_FILES_DIR, LABELED_FILES_DIR, TEMP_CHUNKS_DIR].forEach(dir => {
@@ -24,6 +25,13 @@ const TEMP_CHUNKS_DIR = path.join(__dirname, '../temp-chunks');
     fs.mkdirSync(dir, { recursive: true });
   }
 });
+
+// 输出目录信息（用于调试）
+console.log('📂 服务器目录配置:');
+console.log(`   工作目录: ${process.cwd()}`);
+console.log(`   服务器文件: ${__dirname}`);
+console.log(`   RAW_FILES目录: ${RAW_FILES_DIR}`);
+console.log(`   LABELED_FILES目录: ${LABELED_FILES_DIR}`);
 
 // 分块上传配置 - 使用内存存储，然后手动写入文件
 const uploadChunk = multer({
@@ -64,10 +72,13 @@ function getFilesFromDirectory(dir, type) {
   const files = [];
   
   if (!fs.existsSync(dir)) {
+    console.warn(`⚠️  目录不存在: ${dir}`);
     return files;
   }
   
-  const fileNames = fs.readdirSync(dir).filter(name => !name.endsWith('.json'));
+  const allFiles = fs.readdirSync(dir);
+  const fileNames = allFiles.filter(name => !name.endsWith('.json'));
+  console.log(`📁 扫描目录 ${path.basename(dir)}: 总文件=${allFiles.length}, 非JSON文件=${fileNames.length}`);
   
   for (const fileName of fileNames) {
     const filePath = path.join(dir, fileName);

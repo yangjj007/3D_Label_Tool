@@ -37,6 +37,9 @@ export CHROME_DEBUG_PORT="${CHROME_DEBUG_PORT:-30000}"
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$PROJECT_DIR"
 
+# 确保logs目录存在
+mkdir -p logs
+
 # 日志函数
 log_header() {
     echo -e "${BLUE}========================================${NC}"
@@ -148,32 +151,48 @@ log_success "依赖检查通过"
 # 1. 检查并启动后端服务
 log_step "1/4" "检查后端服务..."
 
+# 为了确保后端工作目录正确，总是重启后端
 if check_port 30005; then
-    log_success "后端服务已运行"
-else
-    log_info "后端未运行，正在启动..."
+    log_info "后端服务已运行，为确保工作目录正确，将重启服务..."
     
-    # 检查是否安装了pm2
+    # 尝试停止现有服务
     if command -v pm2 &> /dev/null; then
-        # 使用pm2启动
-        if [ -f "ecosystem.config.js" ]; then
-            pm2 start ecosystem.config.js --silent
-        else
-            pm2 start server/index.js --name "3d-label-server" --silent
-        fi
-    else
-        # 使用nohup启动
-        nohup node server/index.js > logs/server.log 2>&1 &
-        echo $! > .server.pid
+        pm2 stop "3d-label-server" 2>/dev/null || true
+        pm2 delete "3d-label-server" 2>/dev/null || true
     fi
     
-    # 等待后端启动
-    if wait_for_port 30005 "后端服务"; then
-        log_success "后端服务启动成功"
-    else
-        log_error "后端服务启动失败"
-        exit 1
+    # 如果有PID文件，尝试杀死进程
+    if [ -f ".server.pid" ]; then
+        kill $(cat .server.pid) 2>/dev/null || true
+        rm .server.pid
     fi
+    
+    # 等待端口释放
+    sleep 2
+fi
+
+log_info "正在启动后端服务..."
+
+# 检查是否安装了pm2
+if command -v pm2 &> /dev/null; then
+    # 使用pm2启动
+    if [ -f "ecosystem.config.js" ]; then
+        pm2 start ecosystem.config.js --silent
+    else
+        pm2 start server/index.js --name "3d-label-server" --cwd "$PROJECT_DIR" --silent
+    fi
+else
+    # 使用nohup启动
+    nohup node server/index.js > logs/server.log 2>&1 &
+    echo $! > .server.pid
+fi
+
+# 等待后端启动
+if wait_for_port 30005 "后端服务"; then
+    log_success "后端服务启动成功"
+else
+    log_error "后端服务启动失败，请查看日志: logs/server.log"
+    exit 1
 fi
 
 # 2. 检查并启动前端服务
@@ -253,9 +272,6 @@ log_step "4/4" "启动批量打标任务..."
 echo ""
 log_header "开始执行批量打标"
 echo ""
-
-# 确保logs目录存在
-mkdir -p logs
 
 # 执行自动化脚本
 node automation/batch-labeling.js
