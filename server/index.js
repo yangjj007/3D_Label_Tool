@@ -6,6 +6,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const cors = require('cors');
+const axios = require('axios');
 
 const app = express();
 
@@ -565,6 +566,51 @@ app.post('/api/prompts-library', (req, res) => {
   } catch (error) {
     console.error('保存提示词库失败:', error);
     res.status(500).json({ error: error.message });
+  }
+});
+
+// VLM API 代理
+app.post('/api/vlm/chat/completions', async (req, res) => {
+  try {
+    // 从请求体获取VLM配置和参数
+    const { vlmBaseUrl, ...requestBody } = req.body;
+    
+    // 使用环境变量或请求中提供的VLM地址
+    const targetUrl = vlmBaseUrl || process.env.VLM_BASE_URL || 'http://localhost:30000';
+    
+    console.log(`[VLM代理] 转发请求到: ${targetUrl}/v1/chat/completions`);
+    
+    // 转发请求到VLM服务
+    const response = await axios.post(`${targetUrl}/v1/chat/completions`, requestBody, {
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': req.headers.authorization || ''
+      },
+      timeout: 300000 // 5分钟超时
+    });
+    
+    // 返回VLM响应
+    res.json(response.data);
+    
+  } catch (error) {
+    console.error('[VLM代理] 错误:', error.message);
+    
+    if (error.response) {
+      // VLM服务返回了错误响应
+      res.status(error.response.status).json(error.response.data);
+    } else if (error.request) {
+      // 请求已发送但没有收到响应
+      res.status(503).json({ 
+        error: 'VLM服务无响应', 
+        message: error.message 
+      });
+    } else {
+      // 其他错误
+      res.status(500).json({ 
+        error: '代理请求失败', 
+        message: error.message 
+      });
+    }
   }
 });
 
