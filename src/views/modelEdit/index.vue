@@ -118,6 +118,7 @@ import * as THREE from "three";
 
 import MultiImageVLM from "@/utils/vlmService";
 import RenderPool from "@/utils/RenderPool";
+import OffscreenRenderModel from "@/utils/OffscreenRenderModel";
 
 const store = useMeshEditStore();
 const fileStore = useFileStore();
@@ -436,7 +437,7 @@ const handleBatchDelete = async () => {
   }
 };
 
-const handleBatchTagging = async ({ concurrency, viewKeys }) => {
+const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys }) => {
   // 1. 从服务器获取当前页的raw文件列表
   // 使用 unref 解包可能为 Ref 的属性
   const currentPageVal = unref(fileListRef.value?.currentPage) || 1;
@@ -679,6 +680,11 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
     modelName: vlmConfig.apiConfig.modelName || "qwen3-vl-235b-a22b-instruct"
   });
 
+  // 设置 GPU 并发数（全局配置）
+  const actualGpuConcurrency = gpuConcurrency || 3; // 如果没有传入，默认为 3
+  OffscreenRenderModel.setGpuConcurrency(actualGpuConcurrency);
+  console.log(`[批量打标] GPU 并发数已设置为: ${actualGpuConcurrency}`);
+  
   // 检查 OffscreenCanvas 支持并初始化渲染池
   let renderPool = null;
   const useOffscreenRendering = RenderPool.isSupported();
@@ -903,7 +909,19 @@ const handleBatchTagging = async ({ concurrency, viewKeys }) => {
         console.error(`[批量打标] ⚠️ 超时错误，可能需要增加超时时间或优化处理流程`);
       }
       
-      ElMessage.error(`文件 ${file.name} 处理失败: ${error?.message || error || '未知错误'}`);
+      // 检查是否是 GPU 错误，显示友好提示
+      if (error?.isGpuError || error?.message?.includes('convertToBlob') || error?.message?.includes('GPU')) {
+        const currentGpuMax = OffscreenRenderModel.getGpuConcurrency();
+        ElMessage.error({
+          message: `❌ GPU 截图失败！\n\n💡 建议操作：\n1. 降低 GPU 并发数（当前: ${currentGpuMax}，建议: ${Math.max(1, Math.floor(currentGpuMax / 2))}）\n2. 降低最大并行数\n3. 关闭其他占用 GPU 的程序\n\n详细信息: ${error?.message || '未知错误'}`,
+          duration: 8000,
+          showClose: true,
+          dangerouslyUseHTMLString: true
+        });
+      } else {
+        ElMessage.error(`文件 ${file.name} 处理失败: ${error?.message || error || '未知错误'}`);
+      }
+      
       file.status = 'error';
       fileStore.addOrUpdateFile({ ...file, status: 'error' });
     } finally {

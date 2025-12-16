@@ -51,6 +51,24 @@ class OffscreenRenderModel {
   };
   
   /**
+   * 设置 GPU 并发数（全局配置）
+   * @param {Number} max - 最大并发数 (1-16)
+   */
+  static setGpuConcurrency(max) {
+    const newMax = Math.max(1, Math.min(max, 16));
+    OffscreenRenderModel.gpuSemaphore.max = newMax;
+    console.log(`[OffscreenRenderModel] GPU 并发数已设置为: ${newMax}`);
+    return newMax;
+  }
+  
+  /**
+   * 获取当前 GPU 并发数
+   */
+  static getGpuConcurrency() {
+    return OffscreenRenderModel.gpuSemaphore.max;
+  }
+  
+  /**
    * 获取 GPU 操作许可
    * @returns {Promise<Function>} 返回释放函数
    */
@@ -637,6 +655,23 @@ class OffscreenRenderModel {
       
       for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
+          // 检查 WebGL 上下文状态
+          if (this.gl) {
+            const contextLost = this.gl.isContextLost();
+            if (contextLost) {
+              console.error(`[OffscreenRenderModel] ⚠️ WebGL 上下文已丢失！`);
+              throw new Error('WebGL context lost');
+            }
+          }
+          
+          // 在读取前强制完成所有 GPU 操作
+          if (this.gl) {
+            this.gl.finish(); // 等待 GPU 完成所有命令
+          }
+          
+          // 增加等待时间，确保渲染完成
+          await new Promise(resolve => setTimeout(resolve, 50));
+          
           const blob = await this.canvas.convertToBlob({
             type: 'image/png',
             quality: 0.92
@@ -651,21 +686,39 @@ class OffscreenRenderModel {
           lastError = error;
           
           if (attempt < maxRetries) {
-            // 指数退避：等待时间随重试次数增加
-            const delay = Math.min(100 * Math.pow(2, attempt - 1), 2000);
+            // 指数退避：等待时间随重试次数增加（增加基础延迟）
+            const delay = Math.min(200 * Math.pow(2, attempt - 1), 3000);
             console.warn(`[OffscreenRenderModel] convertToBlob 失败 (尝试 ${attempt}/${maxRetries})，${delay}ms 后重试:`, error.message);
             await new Promise(resolve => setTimeout(resolve, delay));
             
+            // 强制垃圾回收提示（如果浏览器支持）
+            if (typeof global !== 'undefined' && global.gc) {
+              try {
+                global.gc();
+              } catch (e) {
+                // 忽略错误
+              }
+            }
+            
             // 重新渲染
             this.render();
-            await new Promise(resolve => setTimeout(resolve, 150));
+            
+            // 增加等待时间
+            await new Promise(resolve => setTimeout(resolve, 200));
           } else {
             console.error(`[OffscreenRenderModel] convertToBlob 失败，已重试 ${maxRetries} 次:`, error);
           }
         }
       }
       
-      throw lastError;
+      // 抛出带有友好提示的错误
+      const currentGpuMax = OffscreenRenderModel.getGpuConcurrency();
+      const friendlyError = new Error(
+        `GPU 截图失败（已重试 ${maxRetries} 次）。建议降低 GPU 并发数（当前: ${currentGpuMax}）以提高稳定性。原因: ${lastError.message}`
+      );
+      friendlyError.originalError = lastError;
+      friendlyError.isGpuError = true;
+      throw friendlyError;
     } finally {
       // 确保释放 GPU 许可
       releaseGpu();

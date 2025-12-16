@@ -42,11 +42,18 @@
     </div>
 
     <!-- 批量打标弹窗 -->
-    <el-dialog v-model="showBatchTagDialog" title="批量打标配置" width="400px" append-to-body>
+    <el-dialog v-model="showBatchTagDialog" title="批量打标配置" width="450px" append-to-body>
       <div class="batch-tag-config">
         <div class="config-item">
           <span class="label">最大并行数 (1-64):</span>
           <el-slider v-model="batchConcurrency" :min="1" :max="64" show-input />
+        </div>
+        <div class="config-item">
+          <span class="label">GPU 并发数 (1-16):</span>
+          <el-slider v-model="gpuConcurrency" :min="1" :max="16" show-input />
+          <div class="config-sub-tip">
+            控制同时进行截图的材质数量，降低此值可提高稳定性
+          </div>
         </div>
         <div class="config-item">
           <span class="label">截图视角选择:</span>
@@ -63,7 +70,7 @@
           </div>
         </div>
         <div class="config-tip">
-          注意：并行数过高可能会导致浏览器卡顿或接口限流
+          ⚠️ 注意：并行数和GPU并发数过高可能导致浏览器卡顿、接口限流或GPU过载
         </div>
       </div>
       <template #footer>
@@ -205,7 +212,8 @@ const loading = ref(false);
 
 // 批量打标相关
 const showBatchTagDialog = ref(false);
-const batchConcurrency = ref(1);
+const batchConcurrency = ref(10);
+const gpuConcurrency = ref(8); // GPU 并发数
 const selectedViewKeys = ref(["axial"]);
 
 // 视图配置
@@ -322,6 +330,7 @@ const startBatchTagging = () => {
   showBatchTagDialog.value = false;
   emit("batch-tag", { 
     concurrency: batchConcurrency.value,
+    gpuConcurrency: gpuConcurrency.value,
     viewKeys: selectedViewKeys.value
   });
 };
@@ -605,5 +614,12 @@ defineExpose({
   padding: 8px;
   background-color: #f4f4f5;
   border-radius: 4px;
+}
+
+.config-sub-tip {
+  font-size: 11px;
+  color: #909399;
+  margin-top: 4px;
+  line-height: 1.4;
 }
 </style>
