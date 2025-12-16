@@ -24,7 +24,7 @@ if [ ! -z "$OLD_PID" ]; then
 fi
 
 # 清理临时数据
-rm -rf /tmp/chrome-batch-labeling 2>/dev/null
+rm -rf /tmp/chrome-batch-labeling-$CHROME_DEBUG_PORT 2>/dev/null
 
 # 启动 Chrome - SwiftShader 优化版本
 echo -e "${GREEN}🚀 启动 Chrome (SwiftShader 软件渲染)...${NC}"
@@ -38,7 +38,7 @@ nohup google-chrome \
   --headless=new \
   --no-sandbox \
   --disable-dev-shm-usage \
-  --disable-gpu \
+  --ignore-gpu-blocklist \
   --use-gl=swiftshader \
   --enable-unsafe-swiftshader \
   --remote-debugging-port=$CHROME_DEBUG_PORT \
@@ -49,7 +49,7 @@ nohup google-chrome \
   --no-first-run \
   --mute-audio \
   --disable-web-security \
-  --disable-features=IsolateOrigins,site-per-process \
+  --disable-features=IsolateOrigins,site-per-process,V8ProxyResolver \
   --disable-blink-features=AutomationControlled \
   --disable-infobars \
   --disable-background-timer-throttling \
@@ -61,8 +61,8 @@ nohup google-chrome \
   --js-flags="--max-old-space-size=8192" \
   --enable-logging=stderr \
   --v=1 \
-  --single-process \
-  --no-zygote \
+  --disable-setuid-sandbox \
+  --disable-namespace-sandbox \
   http://localhost:$SERVER_PORT \
   > logs/chrome.log 2>&1 &
 
