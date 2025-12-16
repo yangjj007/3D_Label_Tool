@@ -164,40 +164,13 @@ class MultiImageVLM {
 
     while (retries < this.maxRetries) {
       try {
-        // 检测是否为本地VLM服务（需要通过代理）
-        const isLocalVLM = this.baseUrl.includes('localhost') || this.baseUrl.includes('127.0.0.1');
-        
-        let response;
-        if (isLocalVLM) {
-          // 通过后端代理访问本地VLM服务（避免CORS问题）
-          const backendUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:30005/api';
-          const proxyUrl = `${backendUrl.replace(/\/api$/, '')}/api/vlm/chat/completions`;
-          
-          console.log(`[VLM] 使用代理访问: ${proxyUrl}`);
-          
-          response = await axios.post(proxyUrl, {
-            vlmBaseUrl: this.baseUrl,
-            model: this.modelName,
-            messages,
-            temperature,
-            max_tokens: maxTokens,
-            stream: false
-          }, { 
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${this.apiKey}`
-            }
-          });
-        } else {
-          // 直接访问远程VLM服务
-          response = await axios.post(`${this.baseUrl}/v1/chat/completions`, {
-            model: this.modelName,
-            messages,
-            temperature,
-            max_tokens: maxTokens,
-            stream: false
-          }, { headers });
-        }
+        const response = await axios.post(`${this.baseUrl}/v1/chat/completions`, {
+          model: this.modelName,
+          messages,
+          temperature,
+          max_tokens: maxTokens,
+          stream: false
+        }, { headers });
 
         return this._parseResponse(response.data);
       } catch (error) {
