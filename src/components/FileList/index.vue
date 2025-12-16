@@ -213,7 +213,7 @@ const loading = ref(false);
 // 批量打标相关
 const showBatchTagDialog = ref(false);
 const batchConcurrency = ref(10);
-const gpuConcurrency = ref(8); // GPU 并发数
+const gpuConcurrency = ref(10); // GPU 并发数
 const selectedViewKeys = ref(["axial"]);
 
 // 视图配置
