@@ -568,6 +568,64 @@ app.post('/api/prompts-library', (req, res) => {
   }
 });
 
+// VLM API 代理 - 解决CORS问题
+app.post('/api/vlm-proxy', async (req, res) => {
+  try {
+    const { baseUrl, apiKey, requestBody, headers: customHeaders = {} } = req.body;
+    
+    if (!baseUrl) {
+      return res.status(400).json({ error: 'baseUrl参数缺失' });
+    }
+    
+    // 准备请求头
+    const proxyHeaders = {
+      'Content-Type': 'application/json',
+      ...customHeaders
+    };
+    
+    if (apiKey) {
+      proxyHeaders['Authorization'] = `Bearer ${apiKey}`;
+    }
+    
+    console.log(`[VLM Proxy] 转发请求到: ${baseUrl}/v1/chat/completions`);
+    
+    // 使用axios转发请求
+    const axios = require('axios');
+    const response = await axios.post(
+      `${baseUrl}/v1/chat/completions`,
+      requestBody,
+      {
+        headers: proxyHeaders,
+        timeout: 300000, // 5分钟超时
+        validateStatus: () => true // 接受所有状态码
+      }
+    );
+    
+    // 返回响应
+    res.status(response.status).json(response.data);
+    
+  } catch (error) {
+    console.error('[VLM Proxy] 代理请求失败:', error.message);
+    
+    if (error.response) {
+      // API返回了错误响应
+      res.status(error.response.status).json(error.response.data);
+    } else if (error.request) {
+      // 请求发送但没有响应
+      res.status(503).json({ 
+        error: '无法连接到VLM API服务',
+        message: error.message 
+      });
+    } else {
+      // 其他错误
+      res.status(500).json({ 
+        error: '代理请求失败',
+        message: error.message 
+      });
+    }
+  }
+});
+
 // 健康检查
 app.get('/api/health', (req, res) => {
   res.json({
@@ -586,5 +644,6 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`📁 原始文件目录: ${RAW_FILES_DIR}`);
   console.log(`📁 已打标文件目录: ${LABELED_FILES_DIR}`);
   console.log(`📁 临时块目录: ${TEMP_CHUNKS_DIR}`);
+  console.log(`🔄 VLM代理已启用，解决CORS问题`);
 });
 

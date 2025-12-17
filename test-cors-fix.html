@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CORS 修复测试</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            border-bottom: 3px solid #4CAF50;
+            padding-bottom: 10px;
+        }
+        .test-section {
+            margin: 20px 0;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            background: #fafafa;
+        }
+        .test-section h3 {
+            margin-top: 0;
+            color: #555;
+        }
+        button {
+            background: #4CAF50;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+            margin: 5px;
+        }
+        button:hover {
+            background: #45a049;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .result {
+            margin-top: 15px;
+            padding: 10px;
+            border-radius: 5px;
+            font-family: 'Courier New', monospace;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+        .result.success {
+            background: #d4edda;
+            border: 1px solid #c3e6cb;
+            color: #155724;
+        }
+        .result.error {
+            background: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+        }
+        .result.info {
+            background: #d1ecf1;
+            border: 1px solid #bee5eb;
+            color: #0c5460;
+        }
+        .loading {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #4CAF50;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            vertical-align: middle;
+            margin-right: 10px;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .config {
+            background: #e8f5e9;
+            padding: 10px;
+            border-radius: 5px;
+            margin: 10px 0;
+        }
+        .config input {
+            width: 100%;
+            padding: 8px;
+            margin: 5px 0;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔧 CORS 修复测试工具</h1>
+        
+        <div class="test-section">
+            <h3>1️⃣ 测试后端健康状态</h3>
+            <p>测试项目后端服务器是否正常运行</p>
+            <button onclick="testBackendHealth()">测试后端健康状态</button>
+            <div id="health-result"></div>
+        </div>
+
+        <div class="test-section">
+            <h3>2️⃣ 测试 VLM 代理</h3>
+            <p>测试 VLM API 代理是否工作正常</p>
+            <div class="config">
+                <label>VLM API 地址：</label>
+                <input type="text" id="vlm-url" value="http://localhost:30000" placeholder="http://localhost:30000">
+                <label>API Key：</label>
+                <input type="password" id="vlm-key" placeholder="sk-xxxxx">
+                <label>模型名称：</label>
+                <input type="text" id="vlm-model" value="gpt-4o" placeholder="gpt-4o">
+            </div>
+            <button onclick="testVLMProxy()">测试 VLM 代理</button>
+            <button onclick="testVLMDirect()">测试直接访问（会失败）</button>
+            <div id="vlm-result"></div>
+        </div>
+
+        <div class="test-section">
+            <h3>3️⃣ 测试文件API</h3>
+            <p>测试文件列表API是否正常工作</p>
+            <button onclick="testFileAPI()">获取文件列表</button>
+            <div id="file-result"></div>
+        </div>
+
+        <div class="test-section">
+            <h3>📋 测试结果汇总</h3>
+            <div id="summary" class="result info">等待测试...</div>
+        </div>
+    </div>
+
+    <script>
+        const BACKEND_URL = 'http://localhost:10000';
+        const tests = {
+            backend: false,
+            proxy: false,
+            files: false
+        };
+
+        function updateSummary() {
+            const summary = document.getElementById('summary');
+            const passed = Object.values(tests).filter(v => v).length;
+            const total = Object.keys(tests).length;
+            
+            let text = `✅ 通过: ${passed}/${total}\n\n`;
+            text += `后端健康: ${tests.backend ? '✅' : '⏳'}\n`;
+            text += `VLM代理: ${tests.proxy ? '✅' : '⏳'}\n`;
+            text += `文件API: ${tests.files ? '✅' : '⏳'}\n`;
+            
+            if (passed === total) {
+                text += '\n🎉 所有测试通过！CORS 问题已修复。';
+                summary.className = 'result success';
+            } else {
+                summary.className = 'result info';
+            }
+            
+            summary.textContent = text;
+        }
+
+        async function testBackendHealth() {
+            const btn = event.target;
+            const result = document.getElementById('health-result');
+            
+            btn.disabled = true;
+            result.className = 'result info';
+            result.innerHTML = '<span class="loading"></span>测试中...';
+            
+            try {
+                const response = await fetch(`${BACKEND_URL}/api/health`);
+                const data = await response.json();
+                
+                if (data.status === 'ok') {
+                    result.className = 'result success';
+                    result.textContent = `✅ 后端服务正常运行\n\n${JSON.stringify(data, null, 2)}`;
+                    tests.backend = true;
+                } else {
+                    throw new Error('后端返回异常状态');
+                }
+            } catch (error) {
+                result.className = 'result error';
+                result.textContent = `❌ 后端测试失败\n\n错误: ${error.message}\n\n请确认：\n1. 后端服务已启动 (PORT=10000 npm run dev:full)\n2. 端口配置正确`;
+                tests.backend = false;
+            } finally {
+                btn.disabled = false;
+                updateSummary();
+            }
+        }
+
+        async function testVLMProxy() {
+            const btn = event.target;
+            const result = document.getElementById('vlm-result');
+            const vlmUrl = document.getElementById('vlm-url').value;
+            const apiKey = document.getElementById('vlm-key').value;
+            const model = document.getElementById('vlm-model').value;
+            
+            if (!apiKey) {
+                alert('请输入 API Key');
+                return;
+            }
+            
+            btn.disabled = true;
+            result.className = 'result info';
+            result.innerHTML = '<span class="loading"></span>通过代理测试中...';
+            
+            try {
+                const response = await fetch(`${BACKEND_URL}/api/vlm-proxy`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        baseUrl: vlmUrl,
+                        apiKey: apiKey,
+                        requestBody: {
+                            model: model,
+                            messages: [{
+                                role: 'user',
+                                content: 'Hello'
+                            }],
+                            max_tokens: 10
+                        }
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok && data.choices) {
+                    result.className = 'result success';
+                    result.textContent = `✅ VLM 代理工作正常！\n\n通过代理成功调用了 VLM API\n\n响应: ${JSON.stringify(data, null, 2)}`;
+                    tests.proxy = true;
+                } else {
+                    result.className = 'result error';
+                    result.textContent = `⚠️ VLM API 返回错误\n\n${JSON.stringify(data, null, 2)}\n\n这可能是 API 配置问题，但代理本身是工作的。`;
+                }
+            } catch (error) {
+                result.className = 'result error';
+                result.textContent = `❌ VLM 代理测试失败\n\n错误: ${error.message}\n\n请确认：\n1. 后端服务已启动\n2. VLM API 地址正确\n3. API Key 有效`;
+                tests.proxy = false;
+            } finally {
+                btn.disabled = false;
+                updateSummary();
+            }
+        }
+
+        async function testVLMDirect() {
+            const result = document.getElementById('vlm-result');
+            const vlmUrl = document.getElementById('vlm-url').value;
+            const apiKey = document.getElementById('vlm-key').value;
+            const model = document.getElementById('vlm-model').value;
+            
+            if (!apiKey) {
+                alert('请输入 API Key');
+                return;
+            }
+            
+            result.className = 'result info';
+            result.innerHTML = '<span class="loading"></span>直接访问测试中（预期会失败）...';
+            
+            try {
+                const response = await fetch(`${vlmUrl}/v1/chat/completions`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${apiKey}`
+                    },
+                    body: JSON.stringify({
+                        model: model,
+                        messages: [{
+                            role: 'user',
+                            content: 'Hello'
+                        }],
+                        max_tokens: 10
+                    })
+                });
+                
+                const data = await response.json();
+                result.className = 'result success';
+                result.textContent = `⚠️ 直接访问居然成功了！\n\n这意味着 VLM API 已经支持 CORS，不需要代理。\n\n响应: ${JSON.stringify(data, null, 2)}`;
+            } catch (error) {
+                result.className = 'result info';
+                result.textContent = `✅ 符合预期：直接访问失败\n\n错误: ${error.message}\n\n这是正常的！说明需要使用代理来避免 CORS 错误。\n\n请点击"测试 VLM 代理"按钮来验证代理是否工作。`;
+            }
+        }
+
+        async function testFileAPI() {
+            const btn = event.target;
+            const result = document.getElementById('file-result');
+            
+            btn.disabled = true;
+            result.className = 'result info';
+            result.innerHTML = '<span class="loading"></span>测试中...';
+            
+            try {
+                const response = await fetch(`${BACKEND_URL}/api/files?type=all&page=1&pageSize=5`);
+                const data = await response.json();
+                
+                if (data.success) {
+                    result.className = 'result success';
+                    result.textContent = `✅ 文件 API 工作正常\n\n总文件数: ${data.total}\n当前页: ${data.page}/${data.totalPages}\n\n${JSON.stringify(data, null, 2)}`;
+                    tests.files = true;
+                } else {
+                    throw new Error('API 返回失败状态');
+                }
+            } catch (error) {
+                result.className = 'result error';
+                result.textContent = `❌ 文件 API 测试失败\n\n错误: ${error.message}`;
+                tests.files = false;
+            } finally {
+                btn.disabled = false;
+                updateSummary();
+            }
+        }
+
+        // 页面加载时更新摘要
+        updateSummary();
+    </script>
+</body>
+</html>
+

@@ -11,18 +11,36 @@ class MultiImageVLM {
     this.retryDelay = config.retryDelay || 2000; // 毫秒
     this.siteUrl = config.siteUrl || '';
     this.siteName = config.siteName || '';
+    this.useProxy = config.useProxy !== false; // 默认使用代理
+    this.proxyUrl = config.proxyUrl || this._getProxyUrl();
+  }
+
+  // 获取代理URL
+  _getProxyUrl() {
+    // 检查是否是localhost的baseUrl，如果是则使用代理
+    if (this.baseUrl && this.baseUrl.includes('localhost')) {
+      const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:30005/api';
+      return apiBaseUrl.replace(/\/api$/, '') + '/api/vlm-proxy';
+    }
+    return null;
   }
 
   // 初始化配置
   init(config) {
     if (config.apiKey) this.apiKey = config.apiKey;
-    if (config.baseUrl) this.baseUrl = config.baseUrl.trim();
+    if (config.baseUrl) {
+      this.baseUrl = config.baseUrl.trim();
+      // 重新计算代理URL
+      this.proxyUrl = this._getProxyUrl();
+    }
     if (config.modelName) this.modelName = config.modelName;
     if (config.temperature !== undefined) this.temperature = config.temperature;
     if (config.maxRetries) this.maxRetries = config.maxRetries;
     if (config.retryDelay) this.retryDelay = config.retryDelay;
     if (config.siteUrl) this.siteUrl = config.siteUrl;
     if (config.siteName) this.siteName = config.siteName;
+    if (config.useProxy !== undefined) this.useProxy = config.useProxy;
+    if (config.proxyUrl) this.proxyUrl = config.proxyUrl;
     return this;
   }
 
@@ -150,27 +168,51 @@ class MultiImageVLM {
       ]
     }];
 
-    // 准备请求头
-    const headers = {
-      'Authorization': `Bearer ${this.apiKey}`,
-      'Content-Type': 'application/json'
+    // 准备请求体
+    const requestBody = {
+      model: this.modelName,
+      messages,
+      temperature,
+      max_tokens: maxTokens,
+      stream: false
     };
 
-    if (this.siteUrl) headers['HTTP-Referer'] = this.siteUrl;
-    if (this.siteName) headers['X-Title'] = this.siteName;
+    // 准备请求头
+    const customHeaders = {};
+    if (this.siteUrl) customHeaders['HTTP-Referer'] = this.siteUrl;
+    if (this.siteName) customHeaders['X-Title'] = this.siteName;
 
     let retries = 0;
     let lastError = null;
 
     while (retries < this.maxRetries) {
       try {
-        const response = await axios.post(`${this.baseUrl}/v1/chat/completions`, {
-          model: this.modelName,
-          messages,
-          temperature,
-          max_tokens: maxTokens,
-          stream: false
-        }, { headers });
+        let response;
+
+        // 判断是否使用代理
+        const shouldUseProxy = this.useProxy && this.proxyUrl && this.baseUrl.includes('localhost');
+
+        if (shouldUseProxy) {
+          // 通过代理调用
+          console.log(`[VLM] 使用代理: ${this.proxyUrl}`);
+          response = await axios.post(this.proxyUrl, {
+            baseUrl: this.baseUrl,
+            apiKey: this.apiKey,
+            requestBody,
+            headers: customHeaders
+          }, {
+            headers: { 'Content-Type': 'application/json' }
+          });
+        } else {
+          // 直接调用
+          const headers = {
+            'Authorization': `Bearer ${this.apiKey}`,
+            'Content-Type': 'application/json',
+            ...customHeaders
+          };
+
+          response = await axios.post(`${this.baseUrl}/v1/chat/completions`, requestBody, { headers });
+        }
 
         return this._parseResponse(response.data);
       } catch (error) {

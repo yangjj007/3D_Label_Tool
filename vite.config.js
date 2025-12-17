@@ -4,7 +4,13 @@ import vueJsx from "@vitejs/plugin-vue-jsx";
 import { resolve } from "path";
 
 export default defineConfig(mode => {
-  const { VITE_APP_BASE_URL } = loadEnv(mode.mode, process.cwd());
+  const env = loadEnv(mode.mode, process.cwd());
+  const { VITE_APP_BASE_URL, VITE_API_BASE_URL } = env;
+  
+  // 从API_BASE_URL中提取后端服务器地址
+  const apiBaseUrl = VITE_API_BASE_URL || 'http://localhost:10000/api';
+  const backendUrl = apiBaseUrl.replace(/\/api$/, '');
+  
   return {
     plugins: [vue(), vueJsx()],
     css: {
@@ -26,7 +32,15 @@ export default defineConfig(mode => {
     server: {
       host: "0.0.0.0",
       open: true,
-      port: 9999
+      port: 9999,
+      proxy: {
+        // 代理API请求到后端服务器，避免CORS问题
+        '/api': {
+          target: backendUrl,
+          changeOrigin: true,
+          secure: false
+        }
+      }
     },
     build: {
       outDir: "threejs-3dmodel-edit",
