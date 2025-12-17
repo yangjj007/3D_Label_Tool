@@ -141,7 +141,7 @@
               >
                 <el-input-number
                   v-model="prompt.weight"
-                  :min="1"
+                  :min="0"
                   :max="100"
                   size="small"
                   controls-position="right"
