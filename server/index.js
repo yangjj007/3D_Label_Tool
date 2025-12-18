@@ -109,6 +109,12 @@ function getFilesFromDirectory(dir, type) {
   for (const fileName of fileNames) {
     const filePath = path.join(dir, fileName);
     const stats = fs.statSync(filePath);
+    
+    // 跳过目录，只处理文件
+    if (stats.isDirectory()) {
+      console.log(`⏭️  跳过目录: ${fileName}`);
+      continue;
+    }
     const metadataPath = `${filePath}.json`;
     
     let metadata = {
