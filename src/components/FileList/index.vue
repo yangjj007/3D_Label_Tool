@@ -9,6 +9,7 @@
           <el-select v-model="fileType" @change="loadFileList" size="small" style="width: 120px;">
             <el-option label="未打标" value="raw" />
             <el-option label="已打标" value="labeled" />
+            <el-option label="已过滤" value="filtered" />
             <el-option label="全部" value="all" />
           </el-select>
           
@@ -37,9 +38,20 @@
           >
             批量打标({{ totalFiles }})
           </el-button>
+          <el-button 
+            size="small"
+            type="success" 
+            @click="showFilterDialog"
+            :disabled="fileType !== 'labeled' || totalFiles === 0"
+          >
+            批量过滤({{ totalFiles }})
+          </el-button>
         </div>
       </div>
     </div>
+
+    <!-- 过滤对话框 -->
+    <FilterDialog ref="filterDialogRef" />
 
     <!-- 批量打标弹窗 -->
     <el-dialog v-model="showBatchTagDialog" title="批量打标配置" width="450px" append-to-body>
@@ -171,6 +183,7 @@ import { ElMessage, ElLoading } from "element-plus";
 import { Loading } from '@element-plus/icons-vue';
 import { getServerFileList, downloadModelFromServer } from '@/utils/serverApi';
 import { listFolderFiles, getAllFiles } from '@/utils/filePersistence';
+import FilterDialog from '@/components/FilterDialog/index.vue';
 
 const props = defineProps({
   files: {
@@ -215,6 +228,9 @@ const showBatchTagDialog = ref(false);
 const batchConcurrency = ref(10);
 const gpuConcurrency = ref(10); // GPU 并发数
 const selectedViewKeys = ref(["axial"]);
+
+// 过滤对话框引用
+const filterDialogRef = ref(null);
 
 // 视图配置
 const MULTI_VIEW_ORDER = ["main", "top", "side", "axial"];
@@ -389,6 +405,13 @@ const emitDeleteFile = async (file) => {
   emit("delete", file);
   // 删除后刷新列表
   setTimeout(() => loadFileList(), 500);
+};
+
+// 显示过滤对话框
+const showFilterDialog = () => {
+  if (filterDialogRef.value) {
+    filterDialogRef.value.openDialog();
+  }
 };
 
 // 组件挂载时加载列表

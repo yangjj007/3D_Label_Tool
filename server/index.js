@@ -38,10 +38,11 @@ const PROJECT_ROOT = path.resolve(__dirname, '..');
 const FILES_DIR = path.join(PROJECT_ROOT, 'files');
 const RAW_FILES_DIR = path.join(FILES_DIR, 'raw_files');
 const LABELED_FILES_DIR = path.join(FILES_DIR, 'labeled_files');
+const FILTERED_FILES_DIR = path.join(FILES_DIR, 'filtered_files');
 const TEMP_CHUNKS_DIR = path.join(PROJECT_ROOT, 'temp-chunks');
 
 // 确保目录存在
-[FILES_DIR, RAW_FILES_DIR, LABELED_FILES_DIR, TEMP_CHUNKS_DIR].forEach(dir => {
+[FILES_DIR, RAW_FILES_DIR, LABELED_FILES_DIR, FILTERED_FILES_DIR, TEMP_CHUNKS_DIR].forEach(dir => {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
@@ -53,6 +54,7 @@ console.log(`   工作目录: ${process.cwd()}`);
 console.log(`   服务器文件: ${__dirname}`);
 console.log(`   RAW_FILES目录: ${RAW_FILES_DIR}`);
 console.log(`   LABELED_FILES目录: ${LABELED_FILES_DIR}`);
+console.log(`   FILTERED_FILES目录: ${FILTERED_FILES_DIR}`);
 
 // 分块上传配置 - 使用内存存储，然后手动写入文件
 const uploadChunk = multer({
@@ -70,11 +72,14 @@ app.get('/api/files', (req, res) => {
       targetDir = RAW_FILES_DIR;
     } else if (type === 'labeled') {
       targetDir = LABELED_FILES_DIR;
+    } else if (type === 'filtered') {
+      targetDir = FILTERED_FILES_DIR;
     } else {
-      // 合并两个目录的文件
+      // 合并所有目录的文件
       const rawFiles = getFilesFromDirectory(RAW_FILES_DIR, 'raw');
       const labeledFiles = getFilesFromDirectory(LABELED_FILES_DIR, 'labeled');
-      const allFiles = [...rawFiles, ...labeledFiles];
+      const filteredFiles = getFilesFromDirectory(FILTERED_FILES_DIR, 'filtered');
+      const allFiles = [...rawFiles, ...labeledFiles, ...filteredFiles];
       
       return sendPaginatedResponse(allFiles, page, pageSize, res);
     }
@@ -134,6 +139,9 @@ function getFilesFromDirectory(dir, type) {
       updatedAt: metadata.updatedAt || stats.mtime,
       labels: metadata.labels || [],
       hasLabels: metadata.hasLabels || false,
+      filterMetrics: metadata.filterMetrics || null,  // 包含过滤指标数据
+      filteredAt: metadata.filteredAt || null,  // 包含过滤时间
+      sourceType: metadata.sourceType || null,  // 包含来源类型
       isFromServer: true,  // 标记为来自服务器
       serverFileId: fileName  // 服务器文件ID
     });
@@ -286,20 +294,24 @@ app.get('/api/download/:fileId', (req, res) => {
   try {
     const { fileId } = req.params;
     
-    // 优先从labeled目录查找（已打标的文件优先），如果不存在则从raw目录查找
-    let filePath = path.join(LABELED_FILES_DIR, fileId);
-    let fromLabeled = true;
+    // 按优先级查找：filtered -> labeled -> raw
+    let filePath;
+    let fileSource;
     
-    if (!fs.existsSync(filePath)) {
+    if (fs.existsSync(path.join(FILTERED_FILES_DIR, fileId))) {
+      filePath = path.join(FILTERED_FILES_DIR, fileId);
+      fileSource = 'filtered_files';
+    } else if (fs.existsSync(path.join(LABELED_FILES_DIR, fileId))) {
+      filePath = path.join(LABELED_FILES_DIR, fileId);
+      fileSource = 'labeled_files';
+    } else if (fs.existsSync(path.join(RAW_FILES_DIR, fileId))) {
       filePath = path.join(RAW_FILES_DIR, fileId);
-      fromLabeled = false;
-    }
-    
-    if (!fs.existsSync(filePath)) {
+      fileSource = 'raw_files';
+    } else {
       return res.status(404).json({ error: '文件不存在' });
     }
     
-    console.log(`[下载] 文件: ${fileId}, 来源: ${fromLabeled ? 'labeled_files' : 'raw_files'}, 大小: ${fs.statSync(filePath).size} bytes`);
+    console.log(`[下载] 文件: ${fileId}, 来源: ${fileSource}, 大小: ${fs.statSync(filePath).size} bytes`);
     
     const stats = fs.statSync(filePath);
     const fileSize = stats.size;
@@ -350,16 +362,20 @@ app.post('/api/batch-download', (req, res) => {
     }
     
     const filesInfo = fileIds.map(fileId => {
-      // 优先从labeled目录查找
-      let filePath = path.join(LABELED_FILES_DIR, fileId);
-      let type = 'labeled';
+      // 按优先级查找：filtered -> labeled -> raw
+      let filePath;
+      let type;
       
-      if (!fs.existsSync(filePath)) {
+      if (fs.existsSync(path.join(FILTERED_FILES_DIR, fileId))) {
+        filePath = path.join(FILTERED_FILES_DIR, fileId);
+        type = 'filtered';
+      } else if (fs.existsSync(path.join(LABELED_FILES_DIR, fileId))) {
+        filePath = path.join(LABELED_FILES_DIR, fileId);
+        type = 'labeled';
+      } else if (fs.existsSync(path.join(RAW_FILES_DIR, fileId))) {
         filePath = path.join(RAW_FILES_DIR, fileId);
         type = 'raw';
-      }
-      
-      if (!fs.existsSync(filePath)) {
+      } else {
         return { id: fileId, error: '文件不存在' };
       }
       
@@ -453,10 +469,10 @@ app.delete('/api/files/:fileId', (req, res) => {
   try {
     const { fileId } = req.params;
     
-    // 尝试在两个目录中删除
+    // 尝试在三个目录中删除
     let deleted = false;
     
-    for (const dir of [RAW_FILES_DIR, LABELED_FILES_DIR]) {
+    for (const dir of [RAW_FILES_DIR, LABELED_FILES_DIR, FILTERED_FILES_DIR]) {
       const filePath = path.join(dir, fileId);
       const metadataPath = filePath + '.json';
       
@@ -626,6 +642,105 @@ app.post('/api/vlm-proxy', async (req, res) => {
   }
 });
 
+// 更新元数据
+app.post('/api/update-metadata', (req, res) => {
+  try {
+    const { fileId, metadata, fileType = 'labeled' } = req.body;
+    
+    if (!fileId || !metadata) {
+      return res.status(400).json({ error: '缺少必要参数' });
+    }
+    
+    // 确定目标目录
+    let targetDir;
+    if (fileType === 'raw') {
+      targetDir = RAW_FILES_DIR;
+    } else if (fileType === 'labeled') {
+      targetDir = LABELED_FILES_DIR;
+    } else if (fileType === 'filtered') {
+      targetDir = FILTERED_FILES_DIR;
+    } else {
+      return res.status(400).json({ error: '无效的fileType' });
+    }
+    
+    const metadataPath = path.join(targetDir, `${fileId}.json`);
+    
+    console.log(`[update-metadata] 更新元数据: ${fileId} (${fileType})`);
+    
+    // 写入元数据
+    fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2));
+    
+    res.json({
+      success: true,
+      message: '元数据已更新',
+      fileId
+    });
+    
+  } catch (error) {
+    console.error('[update-metadata] 更新元数据失败:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 复制文件到filtered_files
+app.post('/api/copy-to-filtered', (req, res) => {
+  try {
+    const { fileId, sourceType = 'labeled' } = req.body;
+    
+    if (!fileId) {
+      return res.status(400).json({ error: 'fileId参数缺失' });
+    }
+    
+    // 确定源目录
+    let sourceDir;
+    if (sourceType === 'raw') {
+      sourceDir = RAW_FILES_DIR;
+    } else if (sourceType === 'labeled') {
+      sourceDir = LABELED_FILES_DIR;
+    } else {
+      return res.status(400).json({ error: '无效的sourceType' });
+    }
+    
+    const sourcePath = path.join(sourceDir, fileId);
+    const sourceMetaPath = sourcePath + '.json';
+    const targetPath = path.join(FILTERED_FILES_DIR, fileId);
+    const targetMetaPath = targetPath + '.json';
+    
+    console.log(`[copy-to-filtered] 复制文件: ${fileId} (${sourceType} -> filtered)`);
+    
+    // 检查源文件是否存在
+    if (!fs.existsSync(sourcePath)) {
+      return res.status(404).json({ error: '源文件不存在' });
+    }
+    
+    // 复制文件
+    fs.copyFileSync(sourcePath, targetPath);
+    console.log(`[copy-to-filtered] 文件已复制: ${sourcePath} -> ${targetPath}`);
+    
+    // 复制元数据
+    if (fs.existsSync(sourceMetaPath)) {
+      const metadata = JSON.parse(fs.readFileSync(sourceMetaPath, 'utf8'));
+      metadata.filteredAt = new Date().toISOString();
+      metadata.sourceType = sourceType;
+      fs.writeFileSync(targetMetaPath, JSON.stringify(metadata, null, 2));
+      console.log(`[copy-to-filtered] 元数据已复制并更新`);
+    }
+    
+    const fileStats = fs.statSync(targetPath);
+    
+    res.json({
+      success: true,
+      message: '文件已复制到filtered_files',
+      fileId,
+      size: fileStats.size
+    });
+    
+  } catch (error) {
+    console.error('[copy-to-filtered] 复制文件失败:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // 健康检查
 app.get('/api/health', (req, res) => {
   res.json({
@@ -634,6 +749,7 @@ app.get('/api/health', (req, res) => {
     directories: {
       rawFiles: fs.existsSync(RAW_FILES_DIR),
       labeledFiles: fs.existsSync(LABELED_FILES_DIR),
+      filteredFiles: fs.existsSync(FILTERED_FILES_DIR),
       tempChunks: fs.existsSync(TEMP_CHUNKS_DIR)
     }
   });
@@ -643,6 +759,7 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 服务器运行在 http://0.0.0.0:${PORT}`);
   console.log(`📁 原始文件目录: ${RAW_FILES_DIR}`);
   console.log(`📁 已打标文件目录: ${LABELED_FILES_DIR}`);
+  console.log(`📁 过滤文件目录: ${FILTERED_FILES_DIR}`);
   console.log(`📁 临时块目录: ${TEMP_CHUNKS_DIR}`);
   console.log(`🔄 VLM代理已启用，解决CORS问题`);
 });

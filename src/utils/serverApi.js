@@ -297,3 +297,43 @@ export async function healthCheck() {
   }
 }
 
+/**
+ * 更新文件元数据
+ * @param {string} fileId - 文件ID
+ * @param {Object} metadata - 元数据对象
+ * @param {string} fileType - 文件类型 (raw/labeled/filtered)
+ * @returns {Promise}
+ */
+export async function updateMetadata(fileId, metadata, fileType = 'labeled') {
+  try {
+    const response = await axios.post(`${API_BASE_URL}/update-metadata`, {
+      fileId,
+      metadata,
+      fileType
+    });
+    return response.data;
+  } catch (error) {
+    console.error('更新元数据失败:', error);
+    throw error;
+  }
+}
+
+/**
+ * 复制文件到filtered_files
+ * @param {string} fileId - 文件ID
+ * @param {string} sourceType - 源类型 (raw/labeled)
+ * @returns {Promise}
+ */
+export async function copyToFiltered(fileId, sourceType = 'labeled') {
+  try {
+    const response = await axios.post(`${API_BASE_URL}/copy-to-filtered`, {
+      fileId,
+      sourceType
+    });
+    return response.data;
+  } catch (error) {
+    console.error('复制到filtered失败:', error);
+    throw error;
+  }
+}
+
