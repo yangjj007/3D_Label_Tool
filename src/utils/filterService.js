@@ -27,6 +27,40 @@ class ModelFilterService {
   }
 
   /**
+   * 分页获取所有labeled_files
+   * @private
+   * @returns {Promise<Array>} 所有已打标文件
+   */
+  async getAllLabeledFiles() {
+    let allFiles = [];
+    let page = 1;
+    const pageSize = 1000;
+    
+    console.log('[FilterService] 开始分页获取所有labeled_files...');
+    
+    while (true) {
+      const response = await axios.get(`${API_BASE_URL}/files`, {
+        params: { type: 'labeled', page, pageSize }
+      });
+      
+      const files = response.data.files || [];
+      allFiles = allFiles.concat(files);
+      
+      console.log(`[FilterService] 第${page}页: 获取${files.length}个文件, 累计${allFiles.length}个`);
+      
+      // 如果返回的文件数少于pageSize，说明已经是最后一页
+      if (files.length < pageSize) {
+        break;
+      }
+      
+      page++;
+    }
+    
+    console.log(`[FilterService] 分页获取完成，共${allFiles.length}个已打标文件`);
+    return allFiles;
+  }
+
+  /**
    * 批量计算模型指标
    * @param {Object} config - 配置
    * @param {number} config.voxelResolution - 体素分辨率
@@ -47,12 +81,8 @@ class ModelFilterService {
     } = config;
     
     try {
-      // 1. 获取labeled_files列表
-      const response = await axios.get(`${API_BASE_URL}/files`, {
-        params: { type: 'labeled', page: 1, pageSize: 10000 }
-      });
-      
-      const files = response.data.files || [];
+      // 1. 获取labeled_files列表（分页获取所有文件）
+      const files = await this.getAllLabeledFiles();
       console.log(`[FilterService] 获取到 ${files.length} 个已打标文件`);
       
       if (files.length === 0) {
@@ -157,6 +187,12 @@ class ModelFilterService {
             onProgress(progress);
           }
         }
+        
+        // 每处理10批后，添加短暂延迟让浏览器有机会进行垃圾回收
+        if (i > 0 && (i / concurrency) % 10 === 0) {
+          console.log(`[FilterService] 已处理 ${processed}/${files.length} 个文件，短暂暂停以释放内存...`);
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
       }
       
       const totalTime = Math.round((Date.now() - startTime) / 1000);
@@ -196,12 +232,13 @@ class ModelFilterService {
     }
     
     let model = null;
+    let blob = null;
     
     try {
       // 1. 下载模型文件
       console.log(`[FilterService] 下载模型: ${fileName}`);
       const downloadResult = await downloadModelFromServer(file.id, { name: fileName });
-      const blob = downloadResult.blob;
+      blob = downloadResult.blob;
       
       // 2. 加载模型
       console.log(`[FilterService] 加载模型: ${fileName}`);
@@ -237,10 +274,13 @@ class ModelFilterService {
       console.error(`[FilterService] ✗ 失败: ${fileName}`, error);
       throw new Error(`计算${fileName}失败: ${error.message}`);
     } finally {
-      // 清理模型资源
+      // 彻底清理模型资源
       if (model) {
         disposeModel(model);
+        model = null;
       }
+      // 清除blob引用
+      blob = null;
     }
   }
 
@@ -258,12 +298,8 @@ class ModelFilterService {
     this.abortController = new AbortController();
     
     try {
-      // 1. 获取labeled_files列表
-      const response = await axios.get(`${API_BASE_URL}/files`, {
-        params: { type: 'labeled', page: 1, pageSize: 10000 }
-      });
-      
-      const files = response.data.files || [];
+      // 1. 获取labeled_files列表（分页获取所有文件）
+      const files = await this.getAllLabeledFiles();
       console.log(`[FilterService] 获取到 ${files.length} 个已打标文件`);
       
       if (files.length === 0) {
@@ -397,12 +433,8 @@ class ModelFilterService {
     console.log('[FilterService] 开始统计指标数据');
     
     try {
-      // 获取labeled_files列表
-      const response = await axios.get(`${API_BASE_URL}/files`, {
-        params: { type: 'labeled', page: 1, pageSize: 10000 }
-      });
-      
-      const files = response.data.files || [];
+      // 获取labeled_files列表（分页获取所有文件）
+      const files = await this.getAllLabeledFiles();
       console.log(`[FilterService] 获取到 ${files.length} 个已打标文件`);
       
       // 收集所有指标数据

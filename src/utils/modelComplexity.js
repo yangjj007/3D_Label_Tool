@@ -11,6 +11,23 @@ import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader';
 import * as THREE from 'three';
 
+// 创建共享的DRACOLoader实例，避免重复创建
+let sharedDracoLoader = null;
+
+/**
+ * 获取共享的DRACOLoader实例
+ * @returns {DRACOLoader} 共享的DRACOLoader
+ */
+function getSharedDracoLoader() {
+  if (!sharedDracoLoader) {
+    sharedDracoLoader = new DRACOLoader();
+    sharedDracoLoader.setDecoderPath('draco/');
+    sharedDracoLoader.setDecoderConfig({ type: 'js' });
+    console.log('[ModelComplexity] 创建共享DRACOLoader实例');
+  }
+  return sharedDracoLoader;
+}
+
 /**
  * 从Blob加载3D模型
  * @param {Blob} blob - 模型文件Blob
@@ -27,13 +44,8 @@ export async function loadModelFromBlob(blob, fileName) {
     switch (fileExt) {
       case 'glb':
       case 'gltf':
-        const dracoLoader = new DRACOLoader();
-        dracoLoader.setDecoderPath('draco/');
-        dracoLoader.setDecoderConfig({ type: 'js' });
-        dracoLoader.preload();
-        
         loader = new GLTFLoader();
-        loader.setDRACOLoader(dracoLoader);
+        loader.setDRACOLoader(getSharedDracoLoader());
         
         return new Promise((resolve, reject) => {
           loader.load(
@@ -367,6 +379,32 @@ export function checkFilterCriteria(metrics, filterConfig) {
 }
 
 /**
+ * 清理材质及其纹理
+ * @private
+ * @param {THREE.Material} material - 要清理的材质
+ */
+function disposeMaterial(material) {
+  if (!material) return;
+  
+  // 清理所有可能的纹理类型
+  const textureProperties = [
+    'map', 'lightMap', 'bumpMap', 'normalMap', 
+    'specularMap', 'envMap', 'alphaMap', 'aoMap',
+    'displacementMap', 'emissiveMap', 'metalnessMap', 'roughnessMap',
+    'gradientMap', 'matcap'
+  ];
+  
+  textureProperties.forEach(key => {
+    if (material[key]) {
+      material[key].dispose();
+      material[key] = null;
+    }
+  });
+  
+  material.dispose();
+}
+
+/**
  * 清理模型资源
  * @param {THREE.Object3D} model - 要清理的模型
  */
@@ -378,31 +416,34 @@ export function disposeModel(model) {
       // 清理几何体
       if (child.geometry) {
         child.geometry.dispose();
+        child.geometry = null;
       }
       
       // 清理材质
       if (child.material) {
         if (Array.isArray(child.material)) {
-          child.material.forEach(mat => {
-            if (mat.map) mat.map.dispose();
-            if (mat.lightMap) mat.lightMap.dispose();
-            if (mat.bumpMap) mat.bumpMap.dispose();
-            if (mat.normalMap) mat.normalMap.dispose();
-            if (mat.specularMap) mat.specularMap.dispose();
-            if (mat.envMap) mat.envMap.dispose();
-            mat.dispose();
-          });
+          child.material.forEach(mat => disposeMaterial(mat));
         } else {
-          if (child.material.map) child.material.map.dispose();
-          if (child.material.lightMap) child.material.lightMap.dispose();
-          if (child.material.bumpMap) child.material.bumpMap.dispose();
-          if (child.material.normalMap) child.material.normalMap.dispose();
-          if (child.material.specularMap) child.material.specularMap.dispose();
-          if (child.material.envMap) child.material.envMap.dispose();
-          child.material.dispose();
+          disposeMaterial(child.material);
         }
+        child.material = null;
       }
     }
+    
+    // 清理其他可能的资源
+    if (child.dispose && typeof child.dispose === 'function') {
+      child.dispose();
+    }
   });
+  
+  // 清除父子关系
+  if (model.parent) {
+    model.parent.remove(model);
+  }
+  
+  // 清空子节点数组
+  while (model.children.length > 0) {
+    model.remove(model.children[0]);
+  }
 }
 
