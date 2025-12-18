@@ -11,6 +11,11 @@ if (!import.meta.env.VITE_API_BASE_URL) {
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL;
 const CHUNK_SIZE = parseInt(import.meta.env.VITE_CHUNK_SIZE) || 10 * 1024 * 1024; // 10MB 默认
 
+// 创建用于文件上传的axios实例，设置较长超时时间
+const axiosUpload = axios.create({
+  timeout: 120000, // 每个分块上传2分钟超时
+});
+
 /**
  * 分块上传器类
  */
@@ -30,7 +35,7 @@ export class ChunkedUploader {
    */
   async checkExistingChunks() {
     try {
-      const response = await axios.post(`${API_BASE_URL}/check-chunks`, {
+      const response = await axiosUpload.post(`${API_BASE_URL}/check-chunks`, {
         fileId: this.fileId,
         totalChunks: this.totalChunks
       });
@@ -43,7 +48,11 @@ export class ChunkedUploader {
       
       return this.uploadedChunks.size;
     } catch (error) {
-      console.error('检查已上传块失败:', error);
+      if (error.code === 'ECONNABORTED') {
+        console.error('检查已上传块超时');
+      } else {
+        console.error('检查已上传块失败:', error);
+      }
       return 0;
     }
   }
@@ -63,7 +72,7 @@ export class ChunkedUploader {
     formData.append('totalChunks', this.totalChunks);
 
     try {
-      await axios.post(`${API_BASE_URL}/upload-chunk`, formData, {
+      await axiosUpload.post(`${API_BASE_URL}/upload-chunk`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
         onUploadProgress: (progressEvent) => {
           if (onProgress) {
@@ -76,6 +85,10 @@ export class ChunkedUploader {
       this.uploadedChunks.add(chunkIndex);
       return true;
     } catch (error) {
+      if (error.code === 'ECONNABORTED') {
+        console.error(`上传块 ${chunkIndex} 超时`);
+        throw new Error(`上传块 ${chunkIndex} 超时，请检查网络连接`);
+      }
       console.error(`上传块 ${chunkIndex} 失败:`, error);
       throw error;
     }
@@ -156,7 +169,7 @@ export class ChunkedUploader {
    */
   async mergeChunks() {
     try {
-      const response = await axios.post(`${API_BASE_URL}/merge-chunks`, {
+      const response = await axiosUpload.post(`${API_BASE_URL}/merge-chunks`, {
         fileId: this.fileId,
         filename: this.metadata.name || this.file.name,
         totalChunks: this.totalChunks,
@@ -165,6 +178,10 @@ export class ChunkedUploader {
 
       return response.data;
     } catch (error) {
+      if (error.code === 'ECONNABORTED') {
+        console.error('合并块超时');
+        throw new Error('合并文件块超时，请重试');
+      }
       console.error('合并块失败:', error);
       throw error;
     }
@@ -176,11 +193,13 @@ export class ChunkedUploader {
   async abort() {
     this.aborted = true;
     try {
-      await axios.post(`${API_BASE_URL}/cancel-upload`, {
+      await axiosUpload.post(`${API_BASE_URL}/cancel-upload`, {
         fileId: this.fileId
       });
     } catch (error) {
-      console.error('取消上传失败:', error);
+      if (error.code !== 'ECONNABORTED') {
+        console.error('取消上传失败:', error);
+      }
     }
   }
 

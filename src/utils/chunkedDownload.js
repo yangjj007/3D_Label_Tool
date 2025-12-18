@@ -12,6 +12,11 @@ if (!import.meta.env.VITE_API_BASE_URL) {
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL;
 const CHUNK_SIZE = parseInt(import.meta.env.VITE_CHUNK_SIZE) || 10 * 1024 * 1024; // 10MB 默认
 
+// 创建用于文件下载的axios实例，设置较长超时时间
+const axiosDownload = axios.create({
+  timeout: 120000, // 每个分块下载2分钟超时
+});
+
 /**
  * 分块下载器类
  */
@@ -34,7 +39,7 @@ export class ChunkedDownloader {
     const end = Math.min(start + this.chunkSize - 1, this.fileSize - 1);
 
     try {
-      const response = await axios.get(`${API_BASE_URL}/download/${this.fileId}`, {
+      const response = await axiosDownload.get(`${API_BASE_URL}/download/${this.fileId}`, {
         headers: {
           Range: `bytes=${start}-${end}`
         },
@@ -50,6 +55,10 @@ export class ChunkedDownloader {
       this.chunks[chunkIndex] = response.data;
       return true;
     } catch (error) {
+      if (error.code === 'ECONNABORTED') {
+        console.error(`下载块 ${chunkIndex} 超时`);
+        throw new Error(`下载块 ${chunkIndex} 超时，请检查网络连接`);
+      }
       console.error(`下载块 ${chunkIndex} 失败:`, error);
       throw error;
     }

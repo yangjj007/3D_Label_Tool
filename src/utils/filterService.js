@@ -16,6 +16,22 @@ import { downloadModelFromServer } from './serverApi.js';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL;
 
+// 创建带超时配置的axios实例
+const axiosWithTimeout = axios.create({
+  timeout: 60000, // 普通请求60秒超时
+  headers: {
+    'Content-Type': 'application/json',
+  }
+});
+
+// 创建用于长时间操作的axios实例（如下载文件）
+const axiosLongTimeout = axios.create({
+  timeout: 180000, // 长时间操作3分钟超时
+  headers: {
+    'Content-Type': 'application/json',
+  }
+});
+
 /**
  * 模型过滤服务类
  */
@@ -39,21 +55,29 @@ class ModelFilterService {
     console.log('[FilterService] 开始分页获取所有labeled_files...');
     
     while (true) {
-      const response = await axios.get(`${API_BASE_URL}/files`, {
-        params: { type: 'labeled', page, pageSize }
-      });
-      
-      const files = response.data.files || [];
-      allFiles = allFiles.concat(files);
-      
-      console.log(`[FilterService] 第${page}页: 获取${files.length}个文件, 累计${allFiles.length}个`);
-      
-      // 如果返回的文件数少于pageSize，说明已经是最后一页
-      if (files.length < pageSize) {
-        break;
+      try {
+        const response = await axiosWithTimeout.get(`${API_BASE_URL}/files`, {
+          params: { type: 'labeled', page, pageSize }
+        });
+        
+        const files = response.data.files || [];
+        allFiles = allFiles.concat(files);
+        
+        console.log(`[FilterService] 第${page}页: 获取${files.length}个文件, 累计${allFiles.length}个`);
+        
+        // 如果返回的文件数少于pageSize，说明已经是最后一页
+        if (files.length < pageSize) {
+          break;
+        }
+        
+        page++;
+      } catch (error) {
+        if (error.code === 'ECONNABORTED') {
+          console.error(`[FilterService] 请求超时: 第${page}页`);
+          throw new Error(`获取第${page}页文件列表超时，请检查网络连接或服务器状态`);
+        }
+        throw error;
       }
-      
-      page++;
     }
     
     console.log(`[FilterService] 分页获取完成，共${allFiles.length}个已打标文件`);
@@ -255,7 +279,7 @@ class ModelFilterService {
       console.log(`[FilterService] 保存指标: ${fileName}`);
       const updatedMetadata = mergeMetrics(file, metrics);
       
-      await axios.post(`${API_BASE_URL}/update-metadata`, {
+      await axiosWithTimeout.post(`${API_BASE_URL}/update-metadata`, {
         fileId: file.id,
         metadata: updatedMetadata,
         fileType: 'labeled'
@@ -353,7 +377,7 @@ class ModelFilterService {
           
           // 复制到filtered_files
           try {
-            await axios.post(`${API_BASE_URL}/copy-to-filtered`, {
+            await axiosWithTimeout.post(`${API_BASE_URL}/copy-to-filtered`, {
               fileId: file.id,
               sourceType: 'labeled'
             });
@@ -365,13 +389,16 @@ class ModelFilterService {
               metrics: file.filterMetrics
             });
           } catch (error) {
-            console.error(`[FilterService] ✗ ${fileName}: 复制失败`, error);
+            const errorMsg = error.code === 'ECONNABORTED' 
+              ? '请求超时' 
+              : error.message;
+            console.error(`[FilterService] ✗ ${fileName}: 复制失败`, errorMsg);
             results.failed++;
             results.details.push({
               fileName,
               passed: false,
               reason: 'copy_failed',
-              error: error.message
+              error: errorMsg
             });
           }
         } else {

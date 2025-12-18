@@ -14,7 +14,17 @@ if (!import.meta.env.VITE_API_BASE_URL) {
     'VITE_API_BASE_URL=http://10.26.2.3:30005/api'
   );
 }
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL; 
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL;
+
+// 创建带超时配置的axios实例
+const axiosWithTimeout = axios.create({
+  timeout: 60000, // 普通请求60秒超时
+});
+
+// 创建用于长时间操作的axios实例（如文件下载）
+const axiosLongTimeout = axios.create({
+  timeout: 300000, // 长时间操作5分钟超时（大文件下载）
+}); 
 
 
 /**
@@ -26,11 +36,15 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL;
  */
 export async function getServerFileList(type = 'raw', page = 1, pageSize = 10) {
   try {
-    const response = await axios.get(`${API_BASE_URL}/files`, {
+    const response = await axiosWithTimeout.get(`${API_BASE_URL}/files`, {
       params: { type, page, pageSize }
     });
     return response.data;
   } catch (error) {
+    if (error.code === 'ECONNABORTED') {
+      console.error('获取服务器文件列表超时');
+      throw new Error('获取文件列表超时，请检查网络连接或服务器状态');
+    }
     console.error('获取服务器文件列表失败:', error);
     throw error;
   }
@@ -73,7 +87,7 @@ export async function downloadModelFromServer(fileId, metadata, onProgress) {
     
     // 尝试通过HEAD请求获取文件大小（更高效）
     try {
-      const headResponse = await axios.head(`${API_BASE_URL}/download/${fileId}`);
+      const headResponse = await axiosLongTimeout.head(`${API_BASE_URL}/download/${fileId}`);
       fileSize = parseInt(headResponse.headers['content-length'] || '0');
       console.log(`[downloadModelFromServer] 通过HEAD请求获取文件大小: ${fileSize} bytes`);
     } catch (headError) {
@@ -203,7 +217,7 @@ export async function moveToLabeled(fileId, labeledBlob, metadata) {
     
     console.log(`[moveToLabeled] FormData已构建，准备POST到 ${API_BASE_URL}/move-to-labeled`);
     
-    const response = await axios.post(`${API_BASE_URL}/move-to-labeled`, formData, {
+    const response = await axiosLongTimeout.post(`${API_BASE_URL}/move-to-labeled`, formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
       onUploadProgress: (progressEvent) => {
         const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
@@ -232,9 +246,12 @@ export async function moveToLabeled(fileId, labeledBlob, metadata) {
  */
 export async function deleteServerFile(fileId) {
   try {
-    const response = await axios.delete(`${API_BASE_URL}/files/${fileId}`);
+    const response = await axiosWithTimeout.delete(`${API_BASE_URL}/files/${fileId}`);
     return response.data;
   } catch (error) {
+    if (error.code === 'ECONNABORTED') {
+      throw new Error('删除文件请求超时');
+    }
     console.error('删除服务器文件失败:', error);
     throw error;
   }
@@ -289,9 +306,12 @@ export async function clearTemporaryFiles() {
  */
 export async function healthCheck() {
   try {
-    const response = await axios.get(`${API_BASE_URL}/health`);
+    const response = await axiosWithTimeout.get(`${API_BASE_URL}/health`);
     return response.data;
   } catch (error) {
+    if (error.code === 'ECONNABORTED') {
+      throw new Error('健康检查超时，服务器可能未响应');
+    }
     console.error('健康检查失败:', error);
     throw error;
   }
@@ -306,13 +326,16 @@ export async function healthCheck() {
  */
 export async function updateMetadata(fileId, metadata, fileType = 'labeled') {
   try {
-    const response = await axios.post(`${API_BASE_URL}/update-metadata`, {
+    const response = await axiosWithTimeout.post(`${API_BASE_URL}/update-metadata`, {
       fileId,
       metadata,
       fileType
     });
     return response.data;
   } catch (error) {
+    if (error.code === 'ECONNABORTED') {
+      throw new Error('更新元数据请求超时');
+    }
     console.error('更新元数据失败:', error);
     throw error;
   }
@@ -326,12 +349,15 @@ export async function updateMetadata(fileId, metadata, fileType = 'labeled') {
  */
 export async function copyToFiltered(fileId, sourceType = 'labeled') {
   try {
-    const response = await axios.post(`${API_BASE_URL}/copy-to-filtered`, {
+    const response = await axiosWithTimeout.post(`${API_BASE_URL}/copy-to-filtered`, {
       fileId,
       sourceType
     });
     return response.data;
   } catch (error) {
+    if (error.code === 'ECONNABORTED') {
+      throw new Error('复制文件请求超时');
+    }
     console.error('复制到filtered失败:', error);
     throw error;
   }
