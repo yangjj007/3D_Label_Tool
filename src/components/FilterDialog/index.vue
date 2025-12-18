@@ -29,7 +29,7 @@
               <el-input-number 
                 v-model="filterConfig.voxelResolution" 
                 :min="16" 
-                :max="128" 
+                :max="512" 
                 :step="16"
                 size="small" 
               />
@@ -41,8 +41,8 @@
               <el-input-number 
                 v-model="filterConfig.concurrency" 
                 :min="1" 
-                :max="10" 
-                :step="1"
+                :max="100" 
+                :step="5"
                 size="small" 
               />
               <span class="config-tip">（同时计算指标的模型数量）</span>
