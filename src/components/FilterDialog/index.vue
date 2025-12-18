@@ -404,7 +404,7 @@ const drawDensityCharts = () => {
     
     const Range = stats.max - stats.min;
     // const bins = Math.round(Range * 0.05);
-    // const min = Math.floor(stats.min - Range * 0.1);
+    const min = Math.floor(stats.min - Range * 0.1);
     const max = Math.ceil(stats.max + Range * 0.1);
     const binWidth = (max - min) / bins;
     
