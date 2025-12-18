@@ -53,6 +53,127 @@
     <!-- 过滤对话框 -->
     <FilterDialog ref="filterDialogRef" />
 
+    <!-- 指标详情弹窗 -->
+    <el-dialog 
+      v-model="showMetricsDetailDialog" 
+      title="模型指标详情" 
+      width="600px" 
+      append-to-body
+    >
+      <div v-if="selectedFileForMetrics" class="metrics-detail">
+        <div class="metrics-section">
+          <h4 class="section-title">基本信息</h4>
+          <div class="metrics-grid">
+            <div class="metric-item">
+              <span class="metric-label">文件名:</span>
+              <span class="metric-value">{{ selectedFileForMetrics.name }}</span>
+            </div>
+            <div class="metric-item">
+              <span class="metric-label">文件大小:</span>
+              <span class="metric-value">{{ formatFileSize(selectedFileForMetrics.size) }}</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="metrics-section" v-if="selectedFileForMetrics.filterMetrics">
+          <h4 class="section-title">几何统计</h4>
+          <div class="metrics-grid">
+            <div class="metric-item">
+              <span class="metric-label">顶点数量:</span>
+              <span class="metric-value">{{ formatNumber(selectedFileForMetrics.filterMetrics.vertexCount) }}</span>
+            </div>
+            <div class="metric-item">
+              <span class="metric-label">面片数量:</span>
+              <span class="metric-value">{{ formatNumber(selectedFileForMetrics.filterMetrics.faceCount) }}</span>
+            </div>
+            <div class="metric-item">
+              <span class="metric-label">网格数量:</span>
+              <span class="metric-value">{{ selectedFileForMetrics.filterMetrics.meshCount || 'N/A' }}</span>
+            </div>
+            <div class="metric-item">
+              <span class="metric-label">材质数量:</span>
+              <span class="metric-value">{{ selectedFileForMetrics.filterMetrics.materialCount || 'N/A' }}</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="metrics-section" v-if="selectedFileForMetrics.filterMetrics">
+          <h4 class="section-title">体素化信息</h4>
+          <div class="metrics-grid">
+            <div class="metric-item">
+              <span class="metric-label">体素分辨率:</span>
+              <span class="metric-value">{{ selectedFileForMetrics.filterMetrics.voxelResolution || 'N/A' }}</span>
+            </div>
+            <div class="metric-item">
+              <span class="metric-label">占用体素数:</span>
+              <span class="metric-value">{{ formatNumber(selectedFileForMetrics.filterMetrics.occupiedVoxels) }}</span>
+            </div>
+            <div class="metric-item">
+              <span class="metric-label">表面体素数:</span>
+              <span class="metric-value">{{ formatNumber(selectedFileForMetrics.filterMetrics.surfaceVoxels) }}</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="metrics-section" v-if="selectedFileForMetrics.filterMetrics">
+          <h4 class="section-title">复杂度指标</h4>
+          <div class="metrics-grid">
+            <div class="metric-item highlight">
+              <span class="metric-label">
+                <el-tooltip content="体素顶点密度 - 表示模型的几何细节丰富度" placement="top">
+                  <span>VVD <el-icon><QuestionFilled /></el-icon></span>
+                </el-tooltip>
+              </span>
+              <span class="metric-value">{{ formatMetric(selectedFileForMetrics.filterMetrics.VVD) }}</span>
+            </div>
+            <div class="metric-item highlight">
+              <span class="metric-label">
+                <el-tooltip content="体素面片复杂度 - 反映模型的面片分布密度" placement="top">
+                  <span>VFC <el-icon><QuestionFilled /></el-icon></span>
+                </el-tooltip>
+              </span>
+              <span class="metric-value">{{ formatMetric(selectedFileForMetrics.filterMetrics.VFC) }}</span>
+            </div>
+            <div class="metric-item highlight">
+              <span class="metric-label">
+                <el-tooltip content="体素表面复杂度 - 衡量模型表面的复杂程度" placement="top">
+                  <span>VSC <el-icon><QuestionFilled /></el-icon></span>
+                </el-tooltip>
+              </span>
+              <span class="metric-value">{{ formatMetric(selectedFileForMetrics.filterMetrics.VSC) }}</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="metrics-section" v-if="selectedFileForMetrics.filterMetrics">
+          <h4 class="section-title">计算信息</h4>
+          <div class="metrics-grid">
+            <div class="metric-item">
+              <span class="metric-label">计算时间:</span>
+              <span class="metric-value">{{ formatDate(selectedFileForMetrics.filterMetrics.computedAt) }}</span>
+            </div>
+            <div class="metric-item">
+              <span class="metric-label">最后更新:</span>
+              <span class="metric-value">{{ formatDate(selectedFileForMetrics.filterMetrics.lastUpdated) }}</span>
+            </div>
+            <div class="metric-item" v-if="selectedFileForMetrics.filteredAt">
+              <span class="metric-label">过滤时间:</span>
+              <span class="metric-value">{{ formatDate(selectedFileForMetrics.filteredAt) }}</span>
+            </div>
+            <div class="metric-item" v-if="selectedFileForMetrics.sourceType">
+              <span class="metric-label">来源类型:</span>
+              <span class="metric-value">{{ selectedFileForMetrics.sourceType === 'labeled' ? '已打标' : selectedFileForMetrics.sourceType }}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <template #footer>
+        <span class="dialog-footer">
+          <el-button @click="showMetricsDetailDialog = false">关闭</el-button>
+        </span>
+      </template>
+    </el-dialog>
+
     <!-- 批量打标弹窗 -->
     <el-dialog v-model="showBatchTagDialog" title="批量打标配置" width="450px" append-to-body>
       <div class="batch-tag-config">
@@ -147,6 +268,15 @@
             </div>
 
             <div class="file-actions">
+              <!-- 统计按钮 - 仅在已过滤文件且有指标时显示 -->
+              <el-button 
+                v-if="fileType === 'filtered' && file.filterMetrics"
+                size="small" 
+                type="info" 
+                icon="DataAnalysis" 
+                @click.stop="showMetricsDialog(file)"
+                title="查看指标详情"
+              />
               <el-button size="small" type="danger" icon="Delete" @click.stop="emitDeleteFile(file)" />
             </div>
           </div>
@@ -180,7 +310,7 @@
 <script setup>
 import { defineProps, defineEmits, ref, computed, onMounted, onUnmounted, getCurrentInstance, watch, defineExpose } from "vue";
 import { ElMessage, ElLoading } from "element-plus";
-import { Loading } from '@element-plus/icons-vue';
+import { Loading, QuestionFilled, DataAnalysis } from '@element-plus/icons-vue';
 import { getServerFileList, downloadModelFromServer } from '@/utils/serverApi';
 import { listFolderFiles, getAllFiles } from '@/utils/filePersistence';
 import FilterDialog from '@/components/FilterDialog/index.vue';
@@ -231,6 +361,10 @@ const selectedViewKeys = ref(["axial"]);
 
 // 过滤对话框引用
 const filterDialogRef = ref(null);
+
+// 指标详情弹窗
+const showMetricsDetailDialog = ref(false);
+const selectedFileForMetrics = ref(null);
 
 // 视图配置
 const MULTI_VIEW_ORDER = ["main", "top", "side", "axial"];
@@ -411,6 +545,45 @@ const emitDeleteFile = async (file) => {
 const showFilterDialog = () => {
   if (filterDialogRef.value) {
     filterDialogRef.value.openDialog();
+  }
+};
+
+// 显示指标详情弹窗
+const showMetricsDialog = (file) => {
+  selectedFileForMetrics.value = file;
+  showMetricsDetailDialog.value = true;
+};
+
+// 格式化数字
+const formatNumber = (num) => {
+  if (num === undefined || num === null) return 'N/A';
+  return num.toLocaleString();
+};
+
+// 格式化指标值（保留2位小数）
+const formatMetric = (value) => {
+  if (value === undefined || value === null) return 'N/A';
+  if (typeof value === 'number') {
+    return value.toFixed(2);
+  }
+  return value;
+};
+
+// 格式化日期
+const formatDate = (dateString) => {
+  if (!dateString) return 'N/A';
+  try {
+    const date = new Date(dateString);
+    return date.toLocaleString('zh-CN', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit'
+    });
+  } catch (e) {
+    return dateString;
   }
 };
 
@@ -644,5 +817,84 @@ defineExpose({
   color: #909399;
   margin-top: 4px;
   line-height: 1.4;
+}
+
+/* 指标详情弹窗样式 */
+.metrics-detail {
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.metrics-section {
+  margin-bottom: 24px;
+  padding: 16px;
+  background-color: #f8f9fa;
+  border-radius: 8px;
+}
+
+.metrics-section:last-child {
+  margin-bottom: 0;
+}
+
+.section-title {
+  margin: 0 0 16px 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: #303133;
+  border-bottom: 2px solid #409eff;
+  padding-bottom: 8px;
+}
+
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.metric-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 12px;
+  background-color: #fff;
+  border-radius: 6px;
+  border: 1px solid #e4e7ed;
+  transition: all 0.2s;
+}
+
+.metric-item:hover {
+  border-color: #409eff;
+  box-shadow: 0 2px 6px rgba(64, 158, 255, 0.1);
+}
+
+.metric-item.highlight {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  border: none;
+}
+
+.metric-item.highlight .metric-label,
+.metric-item.highlight .metric-value {
+  color: #fff;
+}
+
+.metric-label {
+  font-size: 13px;
+  color: #606266;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.metric-value {
+  font-size: 14px;
+  color: #303133;
+  font-weight: 600;
+  text-align: right;
+}
+
+.metric-label .el-icon {
+  font-size: 14px;
+  cursor: help;
 }
 </style>
