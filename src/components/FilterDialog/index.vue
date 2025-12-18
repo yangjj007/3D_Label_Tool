@@ -33,7 +33,19 @@
                 :step="16"
                 size="small" 
               />
-              <span class="config-tip">（推荐64，越高越精确但计算越慢）</span>
+              <span class="config-tip">（将空间分为n^3的体素格子）</span>
+            </div>
+            
+            <div class="config-row">
+              <span class="label">并发量:</span>
+              <el-input-number 
+                v-model="filterConfig.concurrency" 
+                :min="1" 
+                :max="10" 
+                :step="1"
+                size="small" 
+              />
+              <span class="config-tip">（同时计算指标的模型数量）</span>
             </div>
             
             <el-collapse class="metrics-collapse">
@@ -207,6 +219,7 @@ const filterConfig = ref({
     max: 5
   },
   voxelResolution: 64,
+  concurrency: 3,
   VVD: {
     min: 0,
     max: 100
@@ -281,7 +294,7 @@ const startComputeMetrics = async () => {
     const config = {
       voxelResolution: filterConfig.value.voxelResolution,
       metricsToCompute: selectedMetrics.value,
-      concurrency: 3
+      concurrency: filterConfig.value.concurrency
     };
 
     const result = await filterService.computeMetricsForAllModels(config, (progress) => {
