@@ -1,29 +1,37 @@
 ### 🌱 基于 Three.js+Vue3+Typescript+Element-Plus 开发的 3d 模型可视化编辑系统
 
-<a href='https://gitee.com/ZHANG_6666/Three.js3D/stargazers'><img src='https://gitee.com/ZHANG_6666/Three.js3D/badge/star.svg?theme=dark' alt='star'></img></a> <a href='https://gitee.com/ZHANG_6666/Three.js3D/members'><img src='https://gitee.com/ZHANG_6666/Three.js3D/badge/fork.svg?theme=dark' alt='fork'></img></a>
-
-<a target="_black" href="https://github.com/zhangbo126/threejs-3dmodel-edit">
-<img alt="github-starts" src="https://img.shields.io/github/stars/zhangbo126/threejs-3dmodel-edit?style=social">
+<a target="_black" href="https://github.com/yangjj007/3D_Label_Tool">
+<img alt="github-starts" src="https://img.shields.io/github/stars/yangjj007/3D_Label_Tool?style=social">
 </a>
-<a target="_black" href="https://github.com/zhangbo126/threejs-3dmodel-edit">
-<img alt="github-fork" src="https://img.shields.io/github/forks/zhangbo126/threejs-3dmodel-edit?style=social">
+<a target="_black" href="https://github.com/yangjj007/3D_Label_Tool">
+<img alt="github-fork" src="https://img.shields.io/github/forks/yangjj007/3D_Label_Tool?style=social">
 </a>
-
-### 📦️ 分支介绍
-
-1. master: `Vue3+Pinia+Javascript` (最新的功能 issues 和修复的 bug 都在这个分支)
 
 ### 🌐 安装/启动/打包(详见 package.json)
 
-```
- yarn  / yarn serve  / yarn build(yarn build:pro)
+#### 常规启动
+```bash
+# 安装依赖
+pnpm install
 
- pnpm install / pnpm serve / pnpm build(pnpm build:pro)
-
-
+# 开发模式
+pnpm serve
+# 或
 pnpm run dev:full
-npx pnpm run dev:full -y
+
+# 打包部署
+pnpm build        # 或 pnpm build:pro
 ```
+
+<!-- #### 批量打标一键启动（推荐）
+```bash
+# 自动启动后端+前端+Chrome+自动化脚本
+bash start-batch-labeling.sh
+```
+脚本会自动：
+- ✅ 创建 `.env` 配置（端口：前端9999，后端10000）
+- ✅ 启动所有服务并运行批量打标
+- ✅ 详见 `BATCH_LABELING_QUICK_START.md` -->
 
 ### ⚙️ 环境变量配置
 
@@ -34,7 +42,7 @@ npx pnpm run dev:full -y
 cp .env.example .env
 
 # 根据实际情况修改 .env 文件中的配置
-# VITE_API_BASE_URL - 后端 API 地址（默认：http://localhost:30005/api）
+# VITE_API_BASE_URL - 后端 API 地址（默认：http://localhost:10000/api）
 # VITE_CHUNK_SIZE - 分块传输大小（默认：10MB）
 ```
 
@@ -43,6 +51,38 @@ cp .env.example .env
 - `VITE_CHUNK_SIZE`: 大文件分块上传/下载的块大小，默认 10MB
 - `VITE_APP_BASE_URL`: 应用部署的基础路径，默认 `/`
 
+---
+
+### 🎯 核心功能
+
+#### 1️⃣ 语义标签在线编辑
+直接在界面修改已打标模型的语义标签：
+- **使用流程**:
+  1. 加载已打标模型，点击材质对象
+  2. 点击右上角"语义标签"面板的编辑图标（✏️）
+  3. 修改标签内容（最多2000字符）
+  4. 保存后自动写入GLB/GLTF文件
+- **保存位置**: IndexedDB + 服务器 `labeled_files` 目录
+- **支持格式**: GLB、GLTF
+- **详细文档**: `SEMANTIC_LABEL_EDIT_FEATURE.md`
+
+#### 2️⃣ 智能过滤系统
+基于材质数量和复杂度指标筛选高质量模型：
+- **核心指标**:
+  - **材质个数**: 统计模型材质数量
+  - **VVD (体素化顶点密度)**: 原始顶点数 / 占用体素数
+  - **VFC (体素化面片复杂度)**: 原始面片数 / 占用体素数
+  - **VSC (体素表面复杂度)**: 表面体素数 / 占用体素数
+- **使用流程**:
+  1. 切换到"已打标"视图 → 点击"批量过滤"
+  2. 配置体素分辨率（推荐64），计算指标
+  3. 查看统计分析，设置过滤阈值
+  4. 执行过滤，符合条件的模型复制到 `filtered_files`
+- **特性**: 支持断点续传、并发计算、实时进度
+- **详细文档**: `FILTER_SYSTEM_README.md`
+
+---
+
 ### 🎨 预览
 
 - 1.注意:部分模型文件较大,首次加载需要等待较长时间
@@ -50,8 +90,7 @@ cp .env.example .env
 
 ### 项目地址
 
-- 1. github:[https://github.com/zhangbo126/threejs-3dmodel-edit](https://github.com/zhangbo126/threejs-3dmodel-edit)
-- 2. gitee:[https://gitee.com/ZHANG_6666/Three.js3D](https://gitee.com/ZHANG_6666/Three.js3D)
+- github:[https://github.com/yangjj007/3D_Label_Tool](https://github.com/yangjj007/3D_Label_Tool)
 
 ### 🎵 主要技术栈
 
@@ -71,16 +110,11 @@ cp .env.example .env
 | yarn | 1.22.21 | windows | 10     |
 | pnpm | 9.15.1  | windows | 10     |
 
-### 🍻 问题/功能
-
-1. 任何问题 bug 和功能需求欢迎提 issues
-2. 更多功能持续更新中...
-3. 当前项目three.js版本跟随官方版本持续同步，如有版本升级导致bug请提issues
-
 ### 🗃️ 功能模块介绍
 
 | 模块名称🚀     | 功能简介         | 功能简介                  | 功能简介                           | 功能简介          |
 | -------------- | ---------------- | ------------------------- | ---------------------------------- | ----------------- |
+| **智能打标**   | **批量打标自动化** | **语义标签在线编辑**      | **智能过滤系统**                   | **复杂度指标计算** |
 | 背景           | 背景图加载       | 全景图加载                | 外部全景图（hdr,jpeg,png）         | 外部视频（video） |
 | 材质           | 材质类型切换     | 材质选中效果              | 材质属性修改（颜色，网格，透明度） | 材质贴图修改      |
 | 后期处理       | 模型分解         | 模型材质拖拽，缩放，平移  | 辉光效果（颜色，强度，半径 ）      |                   |
@@ -99,11 +133,7 @@ cp .env.example .env
 1. 部分功能的使用对电脑的内存依赖较高，如有卡顿等场景请确保有足够的内存使用空间
 2. 建议使用谷歌浏览器`（chrome）`
 3. 模型数据编辑配置存储在`localStorage`如有数据相关报错清除本地数据缓存重新进入即可
-4. 外部模型不支持效果预览，和数据保存
-5. 3d 模型对性能依赖较高,模型库组件配置过`(>4)`,可能导致浏览器崩溃
-6. 部分特殊模型文件和大模型文件加载可能会导致系统卡顿很长时间,如遇到这种情况`（欢迎提issues）`
-
-### 💚 如果觉得该项目对你有帮助留个 star 也是不错的 ⭐
+4. 提示词配置在`prompts-library.json`中
 
 ### 👷 界面
 
@@ -215,14 +245,18 @@ cp .env.example .env
 3. 模块化设计 : 将功能拆分为多个模块，便于维护和扩展
 4. VR 支持 : 支持 VR 模式，可以通过摄像头实现 AR 效果
 5. 丰富的编辑功能 : 支持模型材质、光照、动画、后期效果等多方面的编辑
-### 🍻 相关链接
 
-###### Three.js:[https://threejs.org/](https://threejs.org/)
+<!-- ### 📚 功能文档
 
-###### Element-Plus:[https://element-plus.gitee.io/zh-CN/](https://element-plus.gitee.io/zh-CN/)
+| 文档名称 | 说明 |
+|---------|------|
+| `BATCH_LABELING_QUICK_START.md` | 批量打标快速启动指南（端口配置、故障排查） |
+| `SEMANTIC_LABEL_EDIT_FEATURE.md` | 语义标签编辑功能详解（操作流程、技术实现） |
+| `FILTER_SYSTEM_README.md` | 过滤系统使用指南（指标说明、过滤流程） |
+| `DEPLOYMENT.md` | 部署指南 |
+| `QUICK_START.md` | 快速开始 | -->
 
-###### 模型下载网站 [https://sketchfab.com/feed](https://sketchfab.com/feed)
+### 🍻 致谢
 
-###### 贴图素材网站 [https://polyhaven.com/](https://polyhaven.com/)
-
-###### 图片格式转换网站 [https://onlineconvertfree.com/zh/convert/hdr/](https://onlineconvertfree.com/zh/convert/hdr/)
+感谢下列优秀的开源项目！
+- github:[https://github.com/zhangbo126/threejs-3dmodel-edit](https://github.com/zhangbo126/threejs-3dmodel-edit)
