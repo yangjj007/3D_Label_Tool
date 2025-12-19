@@ -3,8 +3,8 @@
     <!-- 头部操作栏 -->
     <header class="model-header">
       <div class="header-lf">
-        <span> 3d模型可视化打标系统 </span>
-        <span>当前Three.js版本:{{ THREE.REVISION }}</span>
+        <span> 3d模型语义标签生成系统 </span>
+        <!-- <span>当前Three.js版本:{{ THREE.REVISION }}</span> -->
       </div>
       <div class="header-lr">
         <el-space>
