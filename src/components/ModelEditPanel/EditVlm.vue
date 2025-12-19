@@ -200,8 +200,8 @@
         <el-slider
           v-model="batchConcurrency"
           :min="1"
-          :max="8"
-          :step="1"
+          :max="16"
+          :step="2"
           show-input
           :disabled="batchSending"
         />

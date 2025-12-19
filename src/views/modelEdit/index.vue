@@ -81,7 +81,12 @@
           </el-tooltip>
         </div>
         <div v-if="semanticLabelInfo.show" class="semantic-label-panel">
-          <div class="semantic-label-title">语义标签</div>
+          <div class="semantic-label-header">
+            <div class="semantic-label-title">语义标签</div>
+            <el-icon class="edit-icon" @click="handleEditSemanticLabel" title="编辑语义标签">
+              <Edit />
+            </el-icon>
+          </div>
           <div class="semantic-label-value">{{ semanticLabelInfo.text }}</div>
         </div>
         <div id="mesh-txt"></div>
@@ -96,11 +101,14 @@
     <page-loading :loading="loading" :percentage="progress"></page-loading>
     <!-- 嵌入代码弹框 -->
     <implant-code-dialog ref="implantDialog"></implant-code-dialog>
+    <!-- 语义标签编辑弹窗 -->
+    <semantic-label-edit-dialog ref="semanticLabelEditDialog"></semantic-label-edit-dialog>
   </div>
 </template>
 
 <script setup name="modelEdit">
 import { ModelEditPanel, ModelChoose, ImplantCodeDialog, FileList } from "@/components/index";
+import SemanticLabelEditDialog from "@/components/SemanticLabelEditDialog/index.vue";
 import { onMounted, ref, getCurrentInstance, onBeforeUnmount, computed, unref, isRef } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
@@ -133,6 +141,7 @@ const editPanel = ref(null);
 const choosePanel = ref(null);
 const fileListRef = ref(null);
 const implantDialog = ref(null);
+const semanticLabelEditDialog = ref(null);
 const fullscreenStatus = ref(false);
 const loadingTimeout = ref(null);
 const activeLeftTab = ref("fileList");
@@ -1080,6 +1089,61 @@ const loadPersistedFiles = async () => {
 const onResetCamera = () => {
   store.modelApi.onResetModelCamera();
 };
+
+// 编辑语义标签
+const handleEditSemanticLabel = () => {
+  const mesh = store.selectMesh;
+  if (!mesh) {
+    ElMessage.warning('未选中材质对象');
+    return;
+  }
+  
+  const model = store.modelApi?.model;
+  if (!model) {
+    ElMessage.warning('模型未加载');
+    return;
+  }
+  
+  // 获取当前文件信息
+  const currentFile = fileStore.files.find(f => f.id === fileStore.selectedFileId);
+  const fileInfo = {
+    name: currentFile?.name || 'model.glb',
+    fileName: currentFile?.name || 'model.glb'
+  };
+  
+  const fileId = fileStore.selectedFileId;
+  
+  console.log('[编辑语义标签] 打开编辑弹窗:', {
+    meshName: mesh.name || mesh.uuid,
+    hasLabel: !!mesh.userData?.semanticLabel,
+    fileName: fileInfo.name,
+    fileId
+  });
+  
+  // 打开编辑弹窗
+  semanticLabelEditDialog.value?.showDialog(
+    mesh,
+    model,
+    fileInfo,
+    fileId,
+    (updatedMesh, newLabel) => {
+      // 保存成功的回调
+      console.log('[编辑语义标签] 保存成功:', {
+        meshName: updatedMesh.name || updatedMesh.uuid,
+        newLabel: newLabel.substring(0, 50) + '...'
+      });
+      
+      // 更新文件状态标记为已打标
+      if (currentFile) {
+        currentFile.hasLabels = true;
+        fileStore.addOrUpdateFile(currentFile);
+      }
+      
+      // 触发界面更新（Vue 的响应式会自动更新 semanticLabelInfo）
+      ElMessage.success('语义标签已更新');
+    }
+  );
+};
 // 初始化模型库数据
 const initModelBaseData = () => {
   const modelBase = $local.get(MODEL_BASE_DATA);
@@ -1404,10 +1468,27 @@ onBeforeUnmount(() => {
         font-size: 12px;
         color: #fff;
       }
+      .semantic-label-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 4px;
+      }
       .semantic-label-title {
         font-size: 11px;
         color: #8fa3ff;
-        margin-bottom: 4px;
+      }
+      .edit-icon {
+        font-size: 14px;
+        color: #8fa3ff;
+        cursor: pointer;
+        transition: all 0.3s;
+        padding: 2px;
+        border-radius: 3px;
+      }
+      .edit-icon:hover {
+        color: #fff;
+        background-color: rgba(143, 163, 255, 0.2);
       }
       .semantic-label-value {
         font-size: 13px;

@@ -12,9 +12,6 @@
 ### 📦️ 分支介绍
 
 1. master: `Vue3+Pinia+Javascript` (最新的功能 issues 和修复的 bug 都在这个分支)
-2. ts-master: `Vue3+Pinia+Typescript` (master 分支的 typescript 版本,最新版本的ts代码正在开发中ing...)
-3. develop: `Vue3+Pinia+Javascript` (一些不确定的功能和代码重构会在这个分支开发)
-4. gh-pages: `git-pages 线上包分支` (忽略即可)
 
 ### 🌐 安装/启动/打包(详见 package.json)
 
@@ -42,7 +39,7 @@ cp .env.example .env
 ```
 
 **主要配置项：**
-- `VITE_API_BASE_URL`: 后端服务地址，开发环境默认 `http://localhost:30005/api`
+- `VITE_API_BASE_URL`: 后端服务地址，开发环境默认 `http://localhost:10000/api`
 - `VITE_CHUNK_SIZE`: 大文件分块上传/下载的块大小，默认 10MB
 - `VITE_APP_BASE_URL`: 应用部署的基础路径，默认 `/`
 
@@ -107,18 +104,6 @@ cp .env.example .env
 6. 部分特殊模型文件和大模型文件加载可能会导致系统卡顿很长时间,如遇到这种情况`（欢迎提issues）`
 
 ### 💚 如果觉得该项目对你有帮助留个 star 也是不错的 ⭐
-
-### 🥰 或者请作者喝杯咖啡吧,这将是我持续更新的动力,相信这肯定比打赏主播更有意义
-
-![输入图片说明](public/image/code.jpg)
-
-### 🥰又或者该↓项目能满足你的需求,也可联系咨询作者
-
-<!-- Start of Selection -->
-
-**[3D模型场景编辑器(Vue3/React18)](http://threeflowx.cn/docs/):** [获取授权](http://threeflowx.cn/docs/)
-
-<!-- End of Selection -->
 
 ### 👷 界面
 
