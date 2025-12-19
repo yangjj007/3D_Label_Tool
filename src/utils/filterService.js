@@ -50,7 +50,7 @@ class ModelFilterService {
   async getAllLabeledFiles() {
     let allFiles = [];
     let page = 1;
-    const pageSize = 1000;
+    const pageSize = 10000;
     
     console.log('[FilterService] 开始分页获取所有labeled_files...');
     
