@@ -40,10 +40,10 @@
 # 安装依赖
 pnpm install
 
-# 开发模式
-pnpm serve
-# 或
+# 启动服务
 pnpm run dev:full
+# 或
+pnpm serve
 
 # 打包部署
 pnpm build        # 或 pnpm build:pro
@@ -98,12 +98,12 @@ cp .env.example .env
   - **材质个数**: 统计模型材质数量
   - **VVD (体素化顶点密度)**: 原始顶点数 / 占用体素数
   - **VFC (体素化面片复杂度)**: 原始面片数 / 占用体素数
-  - **VSC (体素表面复杂度)**: 表面体素数 / 占用体素数
+  - **VSC (体素化表面复杂度)**: 表面体素数 / 占用体素数
 - **使用流程**:
   1. 切换到"已打标"视图 → 点击"批量过滤"
-  2. 配置体素分辨率（推荐64），计算指标
+  2. 配置体素分辨率，计算指标
   3. 查看统计分析，设置过滤阈值
-  4. 执行过滤，符合条件的模型复制到 `filtered_files`
+  4. 执行过滤，符合条件的模型会复制到 `files/filtered_files`
 - **特性**: 支持断点续传、并发计算、实时进度
 - **详细文档**: `FILTER_SYSTEM_README.md`
 
@@ -163,10 +163,11 @@ cp .env.example .env
 
 ### 👷 界面
 
-![输入图片说明](public/image/2.png)
-![输入图片说明](public/image/3.png)
-![输入图片说明](public/image/4.png)
-![输入图片说明](public/image/6.png)
+![主界面](public/image/1.png)
+![语义标签](public/image/2.png)
+![统计过滤](public/image/3.png)
+![统计过滤](public/image/4.png)
+
 ## 主要目录结构
 ### 1. 核心文件
 - App.vue : 应用程序的根组件，包含路由视图和消息提示对话框
