@@ -1,5 +1,5 @@
 <template>
-  <el-dialog v-model="visible" width="600px" :close-on-click-modal="false">
+  <!-- <el-dialog v-model="visible" width="600px" :close-on-click-modal="false">
     <p class="tip-message">3D模型可视化编辑系统</p>
     <ul class="info-list">
       <li class="info-item">
@@ -26,7 +26,7 @@
         <el-button type="primary" class="copy-button" @click="cloneDialog"> 关闭 </el-button>
       </span>
     </template>
-  </el-dialog>
+  </el-dialog> -->
 </template>
 <script setup>
 import { defineExpose, ref } from "vue";
