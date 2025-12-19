@@ -1,4 +1,4 @@
-### 🌱 基于 Three.js+Vue3+Typescript+Element-Plus 开发的 3d 模型可视化编辑系统
+### 🌱  3d 模型语义标签生成系统
 
 <a target="_black" href="https://github.com/yangjj007/3D_Label_Tool">
 <img alt="github-starts" src="https://img.shields.io/github/stars/yangjj007/3D_Label_Tool?style=social">
