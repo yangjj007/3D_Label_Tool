@@ -105,7 +105,6 @@ cp .env.example .env
   3. 查看统计分析，设置过滤阈值
   4. 执行过滤，符合条件的模型会复制到 `files/filtered_files`
 - **特性**: 支持断点续传、并发计算、实时进度
-- **详细文档**: `FILTER_SYSTEM_README.md`
 
 ---
 

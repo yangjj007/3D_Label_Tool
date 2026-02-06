@@ -121,7 +121,7 @@ import { MODEL_PREVIEW_CONFIG, MODEL_BASE_DATA, MODEL_DEFAULT_CONFIG, UPDATE_MOD
 import { useMeshEditStore } from "@/store/meshEditStore";
 import { useFileStore } from "@/store/fileStore";
 import { deleteModelFile, listFolderFiles, getModelFile, clearModelFiles, STORAGE_FOLDER, getAllFiles } from "@/utils/filePersistence";
-import { getServerFileList, downloadModelFromServer, moveToLabeled, clearBatchFiles, deleteServerFile } from "@/utils/serverApi";
+import { getServerFileList, downloadModelFromServer, moveToLabeled, clearBatchFiles, deleteServerFile, saveLabeledFolder } from "@/utils/serverApi";
 import * as THREE from "three";
 
 import MultiImageVLM from "@/utils/vlmService";
@@ -734,6 +734,7 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys }) => 
       let images = [];
       let materialNames = [];
       let targetMaterialNames = [];
+      let materials = []; // 移到外层作用域
       
       // 使用离屏渲染模式
       if (renderPool) {
@@ -773,7 +774,7 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys }) => 
           console.log(`[批量打标] 模型加载成功 (耗时: ${loadTime}ms)`);
           
           // 3. 获取材质列表并截图
-          const materials = offscreenRenderer.getMaterialList();
+          materials = offscreenRenderer.getMaterialList();
           console.log(`[批量打标] 找到 ${materials.length} 个材质`);
           if (!materials.length) throw new Error("未找到材质");
           
@@ -873,27 +874,106 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys }) => 
         ElMessage.warning(`文件 ${file.name}: ${failureCount} 个材质失败，${successCount} 个成功`);
       }
 
-      // 3. 写入标签并导出
+      // 3. 渲染整体模型多视角图（新格式）
+      console.log(`[批量打标] 开始渲染整体模型视角...`);
+      let overallImages = [];
+      if (offscreenRenderer) {
+        overallImages = await offscreenRenderer.captureOverallModelViews(viewKeys);
+        console.log(`[批量打标] 整体模型视角渲染完成，共 ${overallImages.length} 张`);
+      }
+      
+      // 4. 生成整体标签（使用overallPrompt）
+      console.log(`[批量打标] 开始生成整体标签...`);
+      let overallLabel = '';
+      try {
+        // 从服务器加载提示词库
+        const promptsResponse = await fetch(`${import.meta.env.VITE_API_BASE_URL}/prompts-library`);
+        if (promptsResponse.ok) {
+          const promptsResult = await promptsResponse.json();
+          if (promptsResult.success && promptsResult.data?.overallPrompt) {
+            const overallPrompt = promptsResult.data.overallPrompt.content;
+            console.log(`[批量打标] 使用整体提示词，长度: ${overallPrompt.length} 字符`);
+            
+            const overallResult = await vlmClient.generateOverallLabel(overallPrompt, overallImages, {});
+            if (overallResult.success) {
+              overallLabel = overallResult.label;
+              console.log(`[批量打标] 整体标签生成成功，长度: ${overallLabel.length} 字符`);
+            } else {
+              console.warn(`[批量打标] 整体标签生成失败: ${overallResult.error}`);
+            }
+          } else {
+            console.warn(`[批量打标] 提示词库中未找到整体提示词`);
+          }
+        }
+      } catch (err) {
+        console.error(`[批量打标] 生成整体标签异常:`, err);
+      }
+      
+      // 5. 构建 info.json 数据结构
       const isGlb = /\.(glb|gltf)$/i.test(file.name);
       console.log(`[批量打标] 文件类型: ${isGlb ? 'GLB/GLTF' : 'OBJ'}`);
       
       if (isGlb && offscreenRenderer) {
-        // 使用离屏渲染器导出 GLB
-        console.log(`[批量打标] 应用标签到离屏模型...`);
-        offscreenRenderer.applySemanticLabels(batchResults);
+        console.log(`[批量打标] 构建 info.json 数据...`);
         
-        console.log(`[批量打标] 导出 GLB 文件...`);
-        const modelBlob = await offscreenRenderer.exportToGlbBlob();
-        console.log(`[批量打标] 导出完成，文件大小: ${modelBlob.size} bytes`);
+        // 获取原始文件数据
+        const fileData = await getModelFile(file.id);
+        const originalBlob = fileData.fileBlob;
         
-        console.log(`[批量打标] 上传到服务器 labeled_files...`);
-        await moveToLabeled(file.serverFileId || file.id, modelBlob, {
-          name: file.name,
-          hasLabels: true,
-          size: modelBlob.size,
-          updatedAt: new Date().toISOString()
-        });
+        const infoData = {
+          modelName: file.name,
+          fileSize: originalBlob.size,
+          createdAt: new Date().toISOString(),
+          overallLabel: overallLabel || '未生成整体标签',
+          materials: batchResults
+            .filter(res => !res.error && res.text)
+            .map((res, idx) => ({
+              name: res.materialName || `material_${idx}`,
+              uuid: materials[idx]?.uuid || '',
+              label: res.text || ''
+            })),
+          metadata: {
+            hasLabels: true,
+            updatedAt: new Date().toISOString(),
+            viewKeys: viewKeys,
+            materialCount: batchResults.filter(res => !res.error && res.text).length
+          }
+        };
         
+        console.log(`[批量打标] info.json 构建完成，材质数: ${infoData.materials.length}`);
+        
+        // 6. 准备图片数据
+        console.log(`[批量打标] 准备图片数据...`);
+        const imageData = {
+          overall: overallImages.map((dataURL, idx) => ({
+            viewKey: viewKeys[idx] || `view_${idx}`,
+            dataURL
+          })),
+          materials: []
+        };
+        
+        // 添加材质视角图
+        for (let i = 0; i < images.length; i++) {
+          const materialName = materialNames[i];
+          const materialImages = images[i];
+          
+          for (let j = 0; j < materialImages.length; j++) {
+            imageData.materials.push({
+              materialName: materialName,
+              viewKey: viewKeys[j] || `view_${j}`,
+              dataURL: materialImages[j]
+            });
+          }
+        }
+        
+        console.log(`[批量打标] 图片数据准备完成，整体: ${imageData.overall.length} 张，材质: ${imageData.materials.length} 张`);
+        
+        // 7. 上传文件夹数据到服务器
+        console.log(`[批量打标] 开始上传文件夹结构到服务器...`);
+        await saveLabeledFolder(file.name, originalBlob, infoData, imageData);
+        console.log(`[批量打标] 文件夹结构上传成功`);
+        
+        // 8. 删除 IndexedDB 临时文件
         console.log(`[批量打标] 删除 IndexedDB 临时文件...`);
         await deleteModelFile(file.id);
         

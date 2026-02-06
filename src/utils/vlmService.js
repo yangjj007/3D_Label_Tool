@@ -271,6 +271,51 @@ class MultiImageVLM {
     };
   }
 
+  // 生成整体模型标签（使用专门的整体提示词）
+  async generateOverallLabel(
+    overallPrompt,
+    overallImages,
+    options = {}
+  ) {
+    if (!overallPrompt) {
+      throw new Error('未提供整体标签提示词');
+    }
+
+    if (!overallImages || !Array.isArray(overallImages) || overallImages.length === 0) {
+      throw new Error('未提供整体模型视角图片');
+    }
+
+    console.log(`[VLM] 生成整体标签，图片数量: ${overallImages.length}`);
+
+    try {
+      const result = await this.generateWithImages(overallPrompt, overallImages, options);
+      
+      if (result.error) {
+        console.error(`[VLM] 整体标签生成失败: ${result.error}`);
+        return {
+          success: false,
+          error: result.error,
+          label: ''
+        };
+      }
+
+      console.log(`[VLM] 整体标签生成成功，长度: ${result.text.length} 字符`);
+      
+      return {
+        success: true,
+        label: result.text,
+        usage: result.usage
+      };
+    } catch (error) {
+      console.error(`[VLM] 整体标签生成异常:`, error);
+      return {
+        success: false,
+        error: error.message || '未知错误',
+        label: ''
+      };
+    }
+  }
+
   // 批量生成响应
   async generateBatch(
     requests,

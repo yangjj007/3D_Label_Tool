@@ -6,6 +6,13 @@
   "ignoreKeywords": [
     "Unknown Object"
   ],
+  "overallPrompt": {
+    "id": "overall-model-prompt",
+    "content": "You are an expert in 3D model analysis and categorization. Analyze the provided screenshots of the entire 3D model from multiple viewpoints (which may include front, top, side, and isometric views). Provide a comprehensive description in 2-3 paragraphs covering:\n\n1. **Object Category and Identity**: Clearly identify what type of object this is (e.g., furniture, electronic device, vehicle component, tool, etc.).\n\n2. **Main Components and Structure**: Describe the primary parts/components that make up this object and how they are arranged or connected.\n\n3. **Overall Functionality and Purpose**: Explain what this object is designed to do, its typical use cases, and any notable functional characteristics.\n\n4. **Material and Design Features**: Comment on visible materials, colors, design style, and any distinctive aesthetic or structural features.\n\n**Important Requirements**:\n- Focus on the complete object as a whole, not individual highlighted parts\n- Be specific and technical where appropriate\n- Use clear, professional language\n- Provide enough detail for someone to understand what this object is and what it does\n- Do NOT mention \"screenshots\", \"views\", or \"images\" in your description - write as if directly observing the object\n\n**Example Output**:\nThis is a cordless power drill, a handheld electric tool designed for drilling holes and driving screws in various materials. The drill features a pistol-grip handle with an integrated trigger switch for speed control, a keyless chuck at the front for quick bit changes, and a rechargeable battery pack mounted at the base of the handle. The body is constructed primarily from impact-resistant ABS plastic in black and yellow colors, with rubberized grip sections for improved handling. A forward/reverse selector switch is located above the trigger, and an LED work light is integrated near the chuck to illuminate the work area. This tool is commonly used in construction, woodworking, and general maintenance tasks.\n\nNow analyze the provided 3D model and generate a comprehensive description:",
+    "description": "整体模型分析提示词 - 用于生成完整3D模型的综合描述",
+    "createdAt": "2026-02-06T00:00:00.000Z",
+    "updatedAt": "2026-02-06T00:00:00.000Z"
+  },
   "prompts": [
     {
       "id": "default-prompt-1",

@@ -110,11 +110,77 @@ function getFilesFromDirectory(dir, type) {
     const filePath = path.join(dir, fileName);
     const stats = fs.statSync(filePath);
     
-    // 跳过目录，只处理文件
+    // 处理目录（新格式：文件夹结构）
     if (stats.isDirectory()) {
-      console.log(`⏭️  跳过目录: ${fileName}`);
+      console.log(`📂 发现目录: ${fileName}`);
+      
+      // 检查是否包含 info.json（新格式标识）
+      const infoJsonPath = path.join(filePath, 'info.json');
+      if (fs.existsSync(infoJsonPath)) {
+        try {
+          // 读取 info.json
+          const infoContent = fs.readFileSync(infoJsonPath, 'utf8');
+          const infoData = JSON.parse(infoContent);
+          
+          // 查找 GLB 文件
+          const glbFileName = `${fileName}.glb`;
+          const glbFilePath = path.join(filePath, glbFileName);
+          let glbSize = 0;
+          
+          if (fs.existsSync(glbFilePath)) {
+            glbSize = fs.statSync(glbFilePath).size;
+          }
+          
+          // 计算文件夹总大小
+          const getFolderSize = (dirPath) => {
+            let totalSize = 0;
+            const items = fs.readdirSync(dirPath);
+            for (const item of items) {
+              const itemPath = path.join(dirPath, item);
+              const itemStats = fs.statSync(itemPath);
+              if (itemStats.isDirectory()) {
+                totalSize += getFolderSize(itemPath);
+              } else {
+                totalSize += itemStats.size;
+              }
+            }
+            return totalSize;
+          };
+          
+          const folderSize = getFolderSize(filePath);
+          
+          // 添加文件夹信息
+          files.push({
+            id: fileName,
+            name: `${fileName}.glb`, // 保持与旧格式一致的显示名称
+            size: glbSize,
+            folderSize: folderSize, // 文件夹总大小
+            type: type || 'unknown',
+            status: 'labeled',
+            createdAt: infoData.createdAt || stats.birthtime,
+            updatedAt: infoData.metadata?.updatedAt || stats.mtime,
+            labels: infoData.materials?.map(m => ({ name: m.name, label: m.label })) || [],
+            hasLabels: true,
+            overallLabel: infoData.overallLabel || null, // 整体标签
+            materialCount: infoData.materials?.length || 0, // 材质数量
+            isFolder: true, // 标识为文件夹格式
+            folderPath: filePath, // 文件夹路径
+            isFromServer: true,
+            serverFileId: fileName
+          });
+          
+          console.log(`✓ 文件夹格式（新）: ${fileName}, 材质数: ${infoData.materials?.length || 0}`);
+        } catch (err) {
+          console.warn(`⚠️  读取 info.json 失败: ${infoJsonPath}`, err);
+          // 文件夹格式错误，跳过
+        }
+      } else {
+        console.log(`⏭️  跳过目录（无 info.json）: ${fileName}`);
+      }
       continue;
     }
+    
+    // 处理文件（旧格式：直接保存的 GLB 文件）
     const metadataPath = `${filePath}.json`;
     
     let metadata = {
@@ -145,12 +211,15 @@ function getFilesFromDirectory(dir, type) {
       updatedAt: metadata.updatedAt || stats.mtime,
       labels: metadata.labels || [],
       hasLabels: metadata.hasLabels || false,
-      filterMetrics: metadata.filterMetrics || null,  // 包含过滤指标数据
-      filteredAt: metadata.filteredAt || null,  // 包含过滤时间
-      sourceType: metadata.sourceType || null,  // 包含来源类型
-      isFromServer: true,  // 标记为来自服务器
-      serverFileId: fileName  // 服务器文件ID
+      filterMetrics: metadata.filterMetrics || null,
+      filteredAt: metadata.filteredAt || null,
+      sourceType: metadata.sourceType || null,
+      isFolder: false, // 标识为文件格式（旧）
+      isFromServer: true,
+      serverFileId: fileName
     });
+    
+    console.log(`✓ 文件格式（旧）: ${fileName}`);
   }
   
   // 按创建时间降序排序
@@ -295,25 +364,63 @@ app.post('/api/merge-chunks', async (req, res) => {
   }
 });
 
-// 下载文件（支持分块下载）
+// 下载文件（支持分块下载，支持文件夹格式）
 app.get('/api/download/:fileId', (req, res) => {
   try {
     const { fileId } = req.params;
     
-    // 按优先级查找：filtered -> labeled -> raw
     let filePath;
     let fileSource;
     
-    if (fs.existsSync(path.join(FILTERED_FILES_DIR, fileId))) {
+    // 辅助函数：检查文件夹格式（新格式）
+    const checkFolderFormat = (dir) => {
+      // 移除可能的 .glb/.gltf 扩展名得到文件夹名
+      const folderName = fileId.replace(/\.(glb|gltf)$/i, '');
+      const folderPath = path.join(dir, folderName);
+      
+      if (fs.existsSync(folderPath) && fs.statSync(folderPath).isDirectory()) {
+        // 查找文件夹中的 GLB 文件
+        const glbPath = path.join(folderPath, `${folderName}.glb`);
+        if (fs.existsSync(glbPath)) {
+          return glbPath;
+        }
+      }
+      return null;
+    };
+    
+    // 按优先级查找：filtered -> labeled -> raw
+    // 每个目录先尝试文件夹格式，再尝试单个文件格式
+    
+    // 1. Filtered目录
+    filePath = checkFolderFormat(FILTERED_FILES_DIR);
+    if (filePath) {
+      fileSource = 'filtered_files (folder)';
+    } else if (fs.existsSync(path.join(FILTERED_FILES_DIR, fileId))) {
       filePath = path.join(FILTERED_FILES_DIR, fileId);
-      fileSource = 'filtered_files';
-    } else if (fs.existsSync(path.join(LABELED_FILES_DIR, fileId))) {
-      filePath = path.join(LABELED_FILES_DIR, fileId);
-      fileSource = 'labeled_files';
-    } else if (fs.existsSync(path.join(RAW_FILES_DIR, fileId))) {
-      filePath = path.join(RAW_FILES_DIR, fileId);
-      fileSource = 'raw_files';
-    } else {
+      fileSource = 'filtered_files (file)';
+    }
+    
+    // 2. Labeled目录
+    if (!filePath) {
+      filePath = checkFolderFormat(LABELED_FILES_DIR);
+      if (filePath) {
+        fileSource = 'labeled_files (folder)';
+      } else if (fs.existsSync(path.join(LABELED_FILES_DIR, fileId))) {
+        filePath = path.join(LABELED_FILES_DIR, fileId);
+        fileSource = 'labeled_files (file)';
+      }
+    }
+    
+    // 3. Raw目录
+    if (!filePath) {
+      if (fs.existsSync(path.join(RAW_FILES_DIR, fileId))) {
+        filePath = path.join(RAW_FILES_DIR, fileId);
+        fileSource = 'raw_files';
+      }
+    }
+    
+    if (!filePath) {
+      console.error(`[下载] 文件未找到: ${fileId}`);
       return res.status(404).json({ error: '文件不存在' });
     }
     
@@ -648,7 +755,7 @@ app.post('/api/vlm-proxy', async (req, res) => {
   }
 });
 
-// 更新元数据
+// 更新元数据（支持文件夹格式）
 app.post('/api/update-metadata', (req, res) => {
   try {
     const { fileId, metadata, fileType = 'labeled' } = req.body;
@@ -669,12 +776,47 @@ app.post('/api/update-metadata', (req, res) => {
       return res.status(400).json({ error: '无效的fileType' });
     }
     
-    const metadataPath = path.join(targetDir, `${fileId}.json`);
-    
     console.log(`[update-metadata] 更新元数据: ${fileId} (${fileType})`);
     
-    // 写入元数据
-    fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2));
+    // 检查是否是文件夹格式
+    const folderName = fileId.replace(/\.(glb|gltf)$/i, '');
+    const folderPath = path.join(targetDir, folderName);
+    const infoJsonPath = path.join(folderPath, 'info.json');
+    
+    if (fs.existsSync(folderPath) && fs.statSync(folderPath).isDirectory()) {
+      // 文件夹格式：更新info.json中的filterMetrics
+      console.log(`[update-metadata] 检测到文件夹格式: ${folderName}`);
+      
+      if (fs.existsSync(infoJsonPath)) {
+        // 读取现有的info.json
+        const infoData = JSON.parse(fs.readFileSync(infoJsonPath, 'utf8'));
+        
+        // 更新filterMetrics
+        if (metadata.filterMetrics) {
+          infoData.filterMetrics = metadata.filterMetrics;
+        }
+        
+        // 更新其他元数据
+        if (!infoData.metadata) {
+          infoData.metadata = {};
+        }
+        infoData.metadata.updatedAt = new Date().toISOString();
+        if (metadata.filteredAt) {
+          infoData.metadata.filteredAt = metadata.filteredAt;
+        }
+        
+        // 写回info.json
+        fs.writeFileSync(infoJsonPath, JSON.stringify(infoData, null, 2));
+        console.log(`[update-metadata] 已更新文件夹中的info.json`);
+      } else {
+        console.warn(`[update-metadata] info.json不存在: ${infoJsonPath}`);
+      }
+    } else {
+      // 旧格式：更新.json文件
+      const metadataPath = path.join(targetDir, `${fileId}.json`);
+      fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2));
+      console.log(`[update-metadata] 已更新.json元数据文件`);
+    }
     
     res.json({
       success: true,
@@ -688,7 +830,7 @@ app.post('/api/update-metadata', (req, res) => {
   }
 });
 
-// 复制文件到filtered_files
+// 复制文件到filtered_files（支持文件夹格式）
 app.post('/api/copy-to-filtered', (req, res) => {
   try {
     const { fileId, sourceType = 'labeled' } = req.body;
@@ -707,42 +849,309 @@ app.post('/api/copy-to-filtered', (req, res) => {
       return res.status(400).json({ error: '无效的sourceType' });
     }
     
-    const sourcePath = path.join(sourceDir, fileId);
-    const sourceMetaPath = sourcePath + '.json';
-    const targetPath = path.join(FILTERED_FILES_DIR, fileId);
-    const targetMetaPath = targetPath + '.json';
+    console.log(`[copy-to-filtered] 复制: ${fileId} (${sourceType} -> filtered)`);
     
-    console.log(`[copy-to-filtered] 复制文件: ${fileId} (${sourceType} -> filtered)`);
+    // 递归复制目录的辅助函数
+    const copyDirectoryRecursive = (src, dest) => {
+      if (!fs.existsSync(dest)) {
+        fs.mkdirSync(dest, { recursive: true });
+      }
+      
+      const items = fs.readdirSync(src);
+      for (const item of items) {
+        const srcPath = path.join(src, item);
+        const destPath = path.join(dest, item);
+        
+        const stats = fs.statSync(srcPath);
+        if (stats.isDirectory()) {
+          copyDirectoryRecursive(srcPath, destPath);
+        } else {
+          fs.copyFileSync(srcPath, destPath);
+        }
+      }
+    };
     
-    // 检查源文件是否存在
-    if (!fs.existsSync(sourcePath)) {
-      return res.status(404).json({ error: '源文件不存在' });
+    // 检查是否是文件夹格式
+    const folderName = fileId.replace(/\.(glb|gltf)$/i, '');
+    const sourceFolderPath = path.join(sourceDir, folderName);
+    
+    let totalSize = 0;
+    
+    if (fs.existsSync(sourceFolderPath) && fs.statSync(sourceFolderPath).isDirectory()) {
+      // 文件夹格式：递归复制整个文件夹
+      console.log(`[copy-to-filtered] 检测到文件夹格式: ${folderName}`);
+      
+      const targetFolderPath = path.join(FILTERED_FILES_DIR, folderName);
+      copyDirectoryRecursive(sourceFolderPath, targetFolderPath);
+      
+      // 更新info.json中的filteredAt
+      const infoJsonPath = path.join(targetFolderPath, 'info.json');
+      if (fs.existsSync(infoJsonPath)) {
+        const infoData = JSON.parse(fs.readFileSync(infoJsonPath, 'utf8'));
+        if (!infoData.metadata) {
+          infoData.metadata = {};
+        }
+        infoData.metadata.filteredAt = new Date().toISOString();
+        infoData.metadata.sourceType = sourceType;
+        fs.writeFileSync(infoJsonPath, JSON.stringify(infoData, null, 2));
+      }
+      
+      // 计算文件夹总大小
+      const calculateFolderSize = (dirPath) => {
+        let size = 0;
+        const items = fs.readdirSync(dirPath);
+        for (const item of items) {
+          const itemPath = path.join(dirPath, item);
+          const stats = fs.statSync(itemPath);
+          if (stats.isDirectory()) {
+            size += calculateFolderSize(itemPath);
+          } else {
+            size += stats.size;
+          }
+        }
+        return size;
+      };
+      
+      totalSize = calculateFolderSize(targetFolderPath);
+      console.log(`[copy-to-filtered] 文件夹已复制，总大小: ${totalSize} bytes`);
+      
+    } else {
+      // 旧格式：复制单个文件
+      const sourcePath = path.join(sourceDir, fileId);
+      const sourceMetaPath = sourcePath + '.json';
+      const targetPath = path.join(FILTERED_FILES_DIR, fileId);
+      const targetMetaPath = targetPath + '.json';
+      
+      if (!fs.existsSync(sourcePath)) {
+        return res.status(404).json({ error: '源文件不存在' });
+      }
+      
+      fs.copyFileSync(sourcePath, targetPath);
+      console.log(`[copy-to-filtered] 文件已复制: ${sourcePath} -> ${targetPath}`);
+      
+      // 复制元数据
+      if (fs.existsSync(sourceMetaPath)) {
+        const metadata = JSON.parse(fs.readFileSync(sourceMetaPath, 'utf8'));
+        metadata.filteredAt = new Date().toISOString();
+        metadata.sourceType = sourceType;
+        fs.writeFileSync(targetMetaPath, JSON.stringify(metadata, null, 2));
+        console.log(`[copy-to-filtered] 元数据已复制并更新`);
+      }
+      
+      totalSize = fs.statSync(targetPath).size;
     }
-    
-    // 复制文件
-    fs.copyFileSync(sourcePath, targetPath);
-    console.log(`[copy-to-filtered] 文件已复制: ${sourcePath} -> ${targetPath}`);
-    
-    // 复制元数据
-    if (fs.existsSync(sourceMetaPath)) {
-      const metadata = JSON.parse(fs.readFileSync(sourceMetaPath, 'utf8'));
-      metadata.filteredAt = new Date().toISOString();
-      metadata.sourceType = sourceType;
-      fs.writeFileSync(targetMetaPath, JSON.stringify(metadata, null, 2));
-      console.log(`[copy-to-filtered] 元数据已复制并更新`);
-    }
-    
-    const fileStats = fs.statSync(targetPath);
     
     res.json({
       success: true,
       message: '文件已复制到filtered_files',
       fileId,
-      size: fileStats.size
+      size: totalSize
     });
     
   } catch (error) {
-    console.error('[copy-to-filtered] 复制文件失败:', error);
+    console.error('[copy-to-filtered] 复制失败:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 保存标签数据到文件夹结构（新格式）
+app.post('/api/save-labeled-folder', uploadChunk.any(), async (req, res) => {
+  try {
+    const { modelName, infoJson } = req.body;
+    
+    if (!modelName) {
+      return res.status(400).json({ error: 'modelName参数缺失' });
+    }
+    
+    if (!infoJson) {
+      return res.status(400).json({ error: 'infoJson参数缺失' });
+    }
+    
+    // 解析 info.json 数据
+    let infoData;
+    try {
+      infoData = JSON.parse(infoJson);
+    } catch (err) {
+      return res.status(400).json({ error: 'infoJson格式错误: ' + err.message });
+    }
+    
+    // 从文件名中移除扩展名（如果有）
+    const folderName = modelName.replace(/\.(glb|gltf)$/i, '');
+    const modelFolderPath = path.join(LABELED_FILES_DIR, folderName);
+    
+    console.log(`[save-labeled-folder] 开始保存文件夹: ${folderName}`);
+    console.log(`[save-labeled-folder] 目标路径: ${modelFolderPath}`);
+    console.log(`[save-labeled-folder] 接收到的文件数量: ${req.files?.length || 0}`);
+    
+    // 创建文件夹结构
+    const imagesFolderPath = path.join(modelFolderPath, 'images');
+    const overallImagesPath = path.join(imagesFolderPath, 'overall');
+    const materialsImagesPath = path.join(imagesFolderPath, 'materials');
+    
+    [modelFolderPath, imagesFolderPath, overallImagesPath, materialsImagesPath].forEach(dir => {
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+    });
+    
+    // 保存文件
+    if (req.files && req.files.length > 0) {
+      for (const file of req.files) {
+        if (file.fieldname === 'glbFile') {
+          // 保存 GLB 文件
+          const glbFilePath = path.join(modelFolderPath, `${folderName}.glb`);
+          fs.writeFileSync(glbFilePath, file.buffer);
+          console.log(`[save-labeled-folder] GLB文件已保存: ${glbFilePath}, 大小: ${file.size} bytes`);
+        } else if (file.fieldname.startsWith('image_')) {
+          // 保存图片文件
+          // fieldname 格式: image_overall_main 或 image_materials_materialName_main
+          const parts = file.fieldname.split('_');
+          parts.shift(); // 移除 'image' 前缀
+          
+          if (parts[0] === 'overall') {
+            // 整体视角图: image_overall_viewKey -> images/overall/viewKey.png
+            const viewKey = parts.slice(1).join('_');
+            const imagePath = path.join(overallImagesPath, `${viewKey}.png`);
+            fs.writeFileSync(imagePath, file.buffer);
+            console.log(`[save-labeled-folder] 整体视角图已保存: ${imagePath}`);
+          } else if (parts[0] === 'materials') {
+            // 材质视角图: image_materials_materialName_viewKey -> images/materials/materialName/viewKey.png
+            const materialName = parts[1];
+            const viewKey = parts.slice(2).join('_');
+            const materialFolder = path.join(materialsImagesPath, materialName);
+            if (!fs.existsSync(materialFolder)) {
+              fs.mkdirSync(materialFolder, { recursive: true });
+            }
+            const imagePath = path.join(materialFolder, `${viewKey}.png`);
+            fs.writeFileSync(imagePath, file.buffer);
+            console.log(`[save-labeled-folder] 材质视角图已保存: ${imagePath}`);
+          }
+        }
+      }
+    }
+    
+    // 保存 info.json
+    const infoJsonPath = path.join(modelFolderPath, 'info.json');
+    fs.writeFileSync(infoJsonPath, JSON.stringify(infoData, null, 2));
+    console.log(`[save-labeled-folder] info.json已保存: ${infoJsonPath}`);
+    
+    // 获取文件夹大小
+    const getFolderSize = (dirPath) => {
+      let totalSize = 0;
+      const files = fs.readdirSync(dirPath);
+      for (const file of files) {
+        const filePath = path.join(dirPath, file);
+        const stats = fs.statSync(filePath);
+        if (stats.isDirectory()) {
+          totalSize += getFolderSize(filePath);
+        } else {
+          totalSize += stats.size;
+        }
+      }
+      return totalSize;
+    };
+    
+    const folderSize = getFolderSize(modelFolderPath);
+    
+    res.json({
+      success: true,
+      folderPath: modelFolderPath,
+      folderName: folderName,
+      size: folderSize,
+      message: '标签数据已保存'
+    });
+    
+  } catch (error) {
+    console.error('[save-labeled-folder] 保存失败:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 更新文件夹中的info.json（用于编辑标签）
+app.post('/api/update-info-json', (req, res) => {
+  try {
+    const { folderName, infoData } = req.body;
+    
+    if (!folderName) {
+      return res.status(400).json({ error: 'folderName参数缺失' });
+    }
+    
+    if (!infoData) {
+      return res.status(400).json({ error: 'infoData参数缺失' });
+    }
+    
+    const folderPath = path.join(LABELED_FILES_DIR, folderName);
+    const infoJsonPath = path.join(folderPath, 'info.json');
+    
+    console.log(`[update-info-json] 更新文件夹: ${folderName}`);
+    
+    // 检查文件夹是否存在
+    if (!fs.existsSync(folderPath)) {
+      return res.status(404).json({ error: '文件夹不存在' });
+    }
+    
+    // 检查info.json是否存在
+    if (!fs.existsSync(infoJsonPath)) {
+      return res.status(404).json({ error: 'info.json不存在' });
+    }
+    
+    // 更新info.json
+    const updatedInfo = {
+      ...infoData,
+      metadata: {
+        ...infoData.metadata,
+        updatedAt: new Date().toISOString()
+      }
+    };
+    
+    fs.writeFileSync(infoJsonPath, JSON.stringify(updatedInfo, null, 2));
+    console.log(`[update-info-json] info.json已更新: ${infoJsonPath}`);
+    
+    res.json({
+      success: true,
+      message: 'info.json已更新',
+      folderName
+    });
+    
+  } catch (error) {
+    console.error('[update-info-json] 更新失败:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 读取文件夹中的info.json
+app.get('/api/get-info-json/:folderName', (req, res) => {
+  try {
+    const { folderName } = req.params;
+    
+    const folderPath = path.join(LABELED_FILES_DIR, folderName);
+    const infoJsonPath = path.join(folderPath, 'info.json');
+    
+    console.log(`[get-info-json] 读取文件夹: ${folderName}`);
+    
+    // 检查文件夹是否存在
+    if (!fs.existsSync(folderPath)) {
+      return res.status(404).json({ error: '文件夹不存在' });
+    }
+    
+    // 检查info.json是否存在
+    if (!fs.existsSync(infoJsonPath)) {
+      return res.status(404).json({ error: 'info.json不存在' });
+    }
+    
+    // 读取info.json
+    const infoContent = fs.readFileSync(infoJsonPath, 'utf8');
+    const infoData = JSON.parse(infoContent);
+    
+    console.log(`[get-info-json] 成功读取info.json`);
+    
+    res.json({
+      success: true,
+      data: infoData
+    });
+    
+  } catch (error) {
+    console.error('[get-info-json] 读取失败:', error);
     res.status(500).json({ error: error.message });
   }
 });

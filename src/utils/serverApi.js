@@ -240,6 +240,85 @@ export async function moveToLabeled(fileId, labeledBlob, metadata) {
 }
 
 /**
+ * 保存标签文件夹结构到服务器（新格式）
+ * @param {string} modelName - 模型文件名（含扩展名）
+ * @param {Blob} glbBlob - 原始GLB文件
+ * @param {Object} infoData - info.json数据
+ * @param {Object} images - 图片数据 { overall: [{viewKey, dataURL}], materials: [{materialName, viewKey, dataURL}] }
+ * @returns {Promise}
+ */
+export async function saveLabeledFolder(modelName, glbBlob, infoData, images) {
+  try {
+    console.log(`[saveLabeledFolder] 开始保存文件夹结构: ${modelName}`);
+    console.log(`[saveLabeledFolder] GLB大小: ${glbBlob.size} bytes`);
+    console.log(`[saveLabeledFolder] 整体视角图: ${images.overall?.length || 0} 张`);
+    console.log(`[saveLabeledFolder] 材质视角图: ${images.materials?.length || 0} 张`);
+    
+    // 辅助函数：DataURL转Blob
+    const dataURLToBlob = (dataURL) => {
+      const arr = dataURL.split(',');
+      const mime = arr[0].match(/:(.*?);/)[1];
+      const bstr = atob(arr[1]);
+      let n = bstr.length;
+      const u8arr = new Uint8Array(n);
+      while(n--) {
+        u8arr[n] = bstr.charCodeAt(n);
+      }
+      return new Blob([u8arr], {type: mime});
+    };
+    
+    const formData = new FormData();
+    formData.append('modelName', modelName);
+    formData.append('glbFile', glbBlob, modelName);
+    formData.append('infoJson', JSON.stringify(infoData));
+    
+    // 添加整体视角图
+    if (images.overall && Array.isArray(images.overall)) {
+      for (const img of images.overall) {
+        const blob = dataURLToBlob(img.dataURL);
+        const fieldName = `image_overall_${img.viewKey}`;
+        formData.append(fieldName, blob, `${img.viewKey}.png`);
+        console.log(`[saveLabeledFolder] 添加整体图: ${fieldName}`);
+      }
+    }
+    
+    // 添加材质视角图
+    if (images.materials && Array.isArray(images.materials)) {
+      for (const img of images.materials) {
+        const blob = dataURLToBlob(img.dataURL);
+        // 清理材质名称（移除特殊字符）
+        const cleanName = img.materialName.replace(/[^a-zA-Z0-9_-]/g, '_');
+        const fieldName = `image_materials_${cleanName}_${img.viewKey}`;
+        formData.append(fieldName, blob, `${img.viewKey}.png`);
+        console.log(`[saveLabeledFolder] 添加材质图: ${fieldName}`);
+      }
+    }
+    
+    console.log(`[saveLabeledFolder] 开始上传到服务器...`);
+    
+    const response = await axiosLongTimeout.post(`${API_BASE_URL}/save-labeled-folder`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      onUploadProgress: (progressEvent) => {
+        const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+        console.log(`[saveLabeledFolder] 上传进度: ${percentCompleted}%`);
+      }
+    });
+    
+    console.log(`[saveLabeledFolder] 上传成功:`, response.data);
+    return response.data;
+  } catch (error) {
+    console.error('[saveLabeledFolder] 保存文件夹失败:', error);
+    if (error.response) {
+      console.error('[saveLabeledFolder] 服务器响应错误:', {
+        status: error.response.status,
+        data: error.response.data
+      });
+    }
+    throw error;
+  }
+}
+
+/**
  * 删除服务器文件
  * @param {string} fileId - 文件ID
  * @returns {Promise}

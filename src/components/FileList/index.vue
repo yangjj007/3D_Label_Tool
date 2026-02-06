@@ -239,11 +239,24 @@
             @click="onSelectFile(file)"
           >
             <div class="file-info">
-              <div class="file-name" :title="file.name">{{ truncateFileName(file.name) }}</div>
+              <div class="file-name" :title="file.name">
+                <el-icon v-if="file.isFolder" style="margin-right: 4px; color: #409eff;">
+                  <Folder />
+                </el-icon>
+                {{ truncateFileName(file.name) }}
+              </div>
               <div class="file-meta">
-                <span class="file-size">{{ formatFileSize(file.size) }}</span>
+                <span class="file-size">
+                  {{ formatFileSize(file.size) }}
+                  <span v-if="file.folderSize" style="color: #909399; font-size: 12px;">
+                    (总: {{ formatFileSize(file.folderSize) }})
+                  </span>
+                </span>
                 <el-tag :type="getLabelStatusType(file)" size="small">
                   {{ getLabelStatusText(file) }}
+                </el-tag>
+                <el-tag v-if="file.isFolder && file.materialCount" type="info" size="small" style="margin-left: 4px;">
+                  {{ file.materialCount }} 材质
                 </el-tag>
               </div>
               <el-progress

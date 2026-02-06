@@ -827,6 +827,86 @@ class OffscreenRenderModel {
   }
   
   /**
+   * 捕获整体模型多视角图片（用于生成整体标签）
+   * @param {Array<String>} viewKeys - 视角键列表，如 ['main', 'axial', 'coronal', 'sagittal']
+   * @returns {Promise<Array<String>>} - 返回图片DataURL数组
+   */
+  async captureOverallModelViews(viewKeys = ['main', 'axial', 'coronal', 'sagittal']) {
+    const images = [];
+    
+    if (!this.model || !this.modelMaterialList || !this.outlinePass) {
+      console.error(`[OffscreenRenderModel] 模型或 OutlinePass 未初始化`);
+      return images;
+    }
+    
+    console.log(`[OffscreenRenderModel] 开始捕获整体模型视角，视角数: ${viewKeys.length}`);
+    
+    // 保存原始材质可见性
+    const originalVisibility = new Map();
+    this.modelMaterialList.forEach(m => {
+      originalVisibility.set(m.uuid, m.visible);
+    });
+    
+    try {
+      // 确保所有材质可见
+      this.modelMaterialList.forEach(m => {
+        m.visible = true;
+      });
+      console.log(`[OffscreenRenderModel] 已设置所有材质可见`);
+      
+      // 清空 OutlinePass 选择（不高亮任何材质）
+      if (this.outlinePass) {
+        this.outlinePass.selectedObjects = [];
+      }
+      
+      // 对每个视角拍照
+      for (let i = 0; i < viewKeys.length; i++) {
+        const viewKey = viewKeys[i];
+        console.log(`[OffscreenRenderModel] 设置整体视角 [${i + 1}/${viewKeys.length}]: ${viewKey}`);
+        
+        this.setCameraView(viewKey);
+        
+        // 打印相机信息
+        console.log(`[OffscreenRenderModel] 相机位置:`, {
+          x: this.camera.position.x.toFixed(2),
+          y: this.camera.position.y.toFixed(2),
+          z: this.camera.position.z.toFixed(2)
+        });
+        
+        // 等待渲染
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
+        // 强制渲染一次
+        this.render();
+        console.log(`[OffscreenRenderModel] 已渲染整体场景`);
+        
+        const dataURL = await this.captureToDataURL();
+        console.log(`[OffscreenRenderModel] 整体截图大小:`, dataURL.length, 'bytes');
+        
+        images.push(dataURL);
+        
+        // 保存截图到本地（用于调试，需要开启开关）
+        if (this.enableDebugScreenshots) {
+          await this.saveDebugImage(dataURL, `overall_${viewKey}_${i}.png`);
+        }
+      }
+      
+      console.log(`[OffscreenRenderModel] 成功捕获整体模型 ${images.length} 张图片`);
+    } finally {
+      // 恢复材质可见性
+      this.modelMaterialList.forEach(m => {
+        const originalVis = originalVisibility.get(m.uuid);
+        if (originalVis !== undefined) {
+          m.visible = originalVis;
+        }
+      });
+      console.log(`[OffscreenRenderModel] 已恢复材质可见性`);
+    }
+    
+    return images;
+  }
+  
+  /**
    * 保存调试图像到浏览器下载（仅当 enableDebugScreenshots = true 时启用）
    * @param {String} dataURL - 图像DataURL
    * @param {String} filename - 文件名

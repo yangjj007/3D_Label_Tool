@@ -102,10 +102,19 @@ const handleSave = async () => {
     
     console.log('[语义标签编辑] 已更新 mesh.userData.semanticLabel:', formData.meshName);
     
-    // 2. 导出模型并写入标签
-    await exportModelWithLabels();
+    // 2. 检测文件格式并保存
+    const fileName = formData.fileInfo.name || formData.fileInfo.fileName || '';
+    const isFolder = formData.fileInfo.isFolder === true;
     
-    ElMessage.success('语义标签已保存并写入模型文件');
+    if (isFolder) {
+      console.log('[语义标签编辑] 检测到文件夹格式，更新 info.json');
+      await updateInfoJson();
+    } else {
+      console.log('[语义标签编辑] 检测到传统格式，导出并写入 GLB');
+      await exportModelWithLabels();
+    }
+    
+    ElMessage.success('语义标签已保存');
     dialogVisible.value = false;
     
     // 3. 调用回调函数通知父组件
@@ -122,7 +131,89 @@ const handleSave = async () => {
 };
 
 /**
- * 导出模型并写入语义标签到 GLB 文件
+ * 更新文件夹格式的 info.json
+ */
+const updateInfoJson = async () => {
+  if (!formData.fileInfo) {
+    throw new Error('文件信息不存在');
+  }
+  
+  const fileName = formData.fileInfo.name || formData.fileInfo.fileName || '';
+  // 移除扩展名得到文件夹名
+  const folderName = fileName.replace(/\.(glb|gltf)$/i, '');
+  
+  console.log('[语义标签编辑] 开始更新 info.json，文件夹:', folderName);
+  
+  // 1. 从服务器读取现有的 info.json
+  const API_BASE_URL = import.meta.env.VITE_API_BASE_URL;
+  const response = await fetch(`${API_BASE_URL}/get-info-json/${folderName}`);
+  
+  if (!response.ok) {
+    throw new Error('无法读取 info.json: ' + response.statusText);
+  }
+  
+  const result = await response.json();
+  if (!result.success || !result.data) {
+    throw new Error('info.json 数据无效');
+  }
+  
+  const infoData = result.data;
+  console.log('[语义标签编辑] 成功读取 info.json，材质数:', infoData.materials?.length || 0);
+  
+  // 2. 更新对应材质的标签
+  const meshName = formData.meshName;
+  const meshUuid = formData.mesh?.uuid;
+  
+  let updated = false;
+  if (infoData.materials && Array.isArray(infoData.materials)) {
+    for (const material of infoData.materials) {
+      if (material.name === meshName || material.uuid === meshUuid) {
+        material.label = formData.label.trim();
+        updated = true;
+        console.log('[语义标签编辑] 更新材质标签:', material.name);
+        break;
+      }
+    }
+  }
+  
+  if (!updated) {
+    console.warn('[语义标签编辑] 未找到匹配的材质，添加新材质');
+    if (!infoData.materials) {
+      infoData.materials = [];
+    }
+    infoData.materials.push({
+      name: meshName,
+      uuid: meshUuid || '',
+      label: formData.label.trim()
+    });
+  }
+  
+  // 3. 将更新后的 info.json 保存回服务器
+  const updateResponse = await fetch(`${API_BASE_URL}/update-info-json`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      folderName: folderName,
+      infoData: infoData
+    })
+  });
+  
+  if (!updateResponse.ok) {
+    throw new Error('保存 info.json 失败: ' + updateResponse.statusText);
+  }
+  
+  const updateResult = await updateResponse.json();
+  if (!updateResult.success) {
+    throw new Error('保存 info.json 失败: ' + updateResult.error);
+  }
+  
+  console.log('[语义标签编辑] info.json 更新成功');
+};
+
+/**
+ * 导出模型并写入语义标签到 GLB 文件（旧格式兼容）
  */
 const exportModelWithLabels = async () => {
   if (!formData.model || !formData.fileInfo) {
