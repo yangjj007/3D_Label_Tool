@@ -64,6 +64,7 @@
               @batch-download="handleBatchDownload"
               @batch-delete="handleBatchDelete"
               @batch-tag="handleBatchTagging"
+              @batch-segment="handleBatchSegment"
             />
           </div>
           <div v-show="activeLeftTab === 'modelChoose'" class="panel-content">

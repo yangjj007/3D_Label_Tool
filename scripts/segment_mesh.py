@@ -42,7 +42,7 @@ def parse_args():
     parser.add_argument('--num_clusters', type=int, default=10, help='Target number of segments')
     parser.add_argument('--method',       default='agglomerative', choices=['agglomerative', 'kmeans'])
     parser.add_argument('--models_dir',   default=os.path.join(PROJECT_ROOT, 'files', 'models'))
-    parser.add_argument('--ckpt',         default=os.path.join(PROJECT_ROOT, 'model', 'model.ckpt'),
+    parser.add_argument('--ckpt',         default=os.path.join(PROJECT_ROOT, 'partfield-ckpt', 'model_objaverse.ckpt'),
                         help='Path to PartField checkpoint')
     return parser.parse_args()
 
