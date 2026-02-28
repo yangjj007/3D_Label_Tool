@@ -34,14 +34,6 @@
           </el-button>
           <el-button 
             size="small"
-            type="info"
-            @click="$emit('batch-segment', { fileType })"
-            :disabled="fileType !== 'raw' || totalFiles === 0"
-          >
-            批量分割({{ totalFiles }})
-          </el-button>
-          <el-button 
-            size="small"
             type="warning" 
             @click="showBatchTagDialog = true"
             :disabled="(fileType !== 'segmented' && fileType !== 'raw') || totalFiles === 0"
@@ -365,7 +357,7 @@ const props = defineProps({
   }
 });
 
-const emit = defineEmits(["select", "delete", "batch-upload", "batch-tag", "batch-segment", "refresh"]);
+const emit = defineEmits(["select", "delete", "batch-upload", "batch-tag", "refresh"]);
 
 // 分页相关状态
 const fileType = ref('raw');
