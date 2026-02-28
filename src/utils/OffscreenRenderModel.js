@@ -938,6 +938,200 @@ class OffscreenRenderModel {
     console.log(`[OffscreenRenderModel] 调试截图保存: ${enable ? '已启用' : '已禁用'}`);
   }
 
+  // ─────────────────────────────────────────────────────────────────────
+  // 分割掩码高亮（基于顶点色，与 renderModel.js 逻辑镜像对应）
+  // ─────────────────────────────────────────────────────────────────────
+
+  /** 固定 32 色调色板（与 renderModel.js 保持一致） */
+  static PALETTE = [
+    '#E6194B','#3CB44B','#4363D8','#F58231','#911EB4',
+    '#42D4F4','#F032E6','#BFEF45','#FABED4','#469990',
+    '#DCBEFF','#9A6324','#FFFAC8','#800000','#AAFFC3',
+    '#808000','#FFD8B1','#000075','#A9A9A9','#FFFFFF',
+    '#E6BEFF','#AA6E28','#FFFACD','#800080','#008080',
+    '#FF6347','#40E0D0','#EE82EE','#F5DEB3','#808080',
+    '#FFA500','#00FFFF'
+  ];
+
+  /**
+   * 按分割掩码为场景中所有 Mesh 写入顶点色，并存储分割状态。
+   * 调用后可通过 captureSegmentWithViews 对某个段进行高亮截图。
+   * @param {number[]} faceLabels - 每个面的分割 ID 数组（长度 = 总面数）
+   */
+  applyFaceSegmentation(faceLabels) {
+    const segIds = [...new Set(faceLabels)].sort((a, b) => a - b);
+    const segmentColors = new Map();
+    segIds.forEach((id, i) => {
+      segmentColors.set(id, OffscreenRenderModel.PALETTE[i % OffscreenRenderModel.PALETTE.length]);
+    });
+
+    this._segState = { faceLabels, segmentColors };
+
+    this.scene.traverse(obj => {
+      if (!(obj instanceof THREE.Mesh)) return;
+      const geo = obj.geometry;
+      if (!geo) return;
+      const posAttr = geo.getAttribute('position');
+      if (!posAttr) return;
+
+      const vertexCount = posAttr.count;
+      const colorArray = new Float32Array(vertexCount * 3);
+
+      if (geo.index) {
+        const idx = geo.index;
+        const faceCount = Math.floor(idx.count / 3);
+        for (let f = 0; f < faceCount; f++) {
+          const segId = faceLabels[f] ?? 0;
+          const color = new THREE.Color(segmentColors.get(segId) ?? '#888888');
+          for (let k = 0; k < 3; k++) {
+            const vi = idx.getX(f * 3 + k);
+            colorArray[vi * 3]     = color.r;
+            colorArray[vi * 3 + 1] = color.g;
+            colorArray[vi * 3 + 2] = color.b;
+          }
+        }
+      } else {
+        const faceCount = Math.floor(vertexCount / 3);
+        for (let f = 0; f < faceCount; f++) {
+          const segId = faceLabels[f] ?? 0;
+          const color = new THREE.Color(segmentColors.get(segId) ?? '#888888');
+          for (let k = 0; k < 3; k++) {
+            const vi = f * 3 + k;
+            colorArray[vi * 3]     = color.r;
+            colorArray[vi * 3 + 1] = color.g;
+            colorArray[vi * 3 + 2] = color.b;
+          }
+        }
+      }
+
+      geo.setAttribute('color', new THREE.BufferAttribute(colorArray, 3));
+      geo.attributes.color.needsUpdate = true;
+
+      const applyVC = (mat) => {
+        if (!mat) return;
+        mat._origVertexColors = mat.vertexColors;
+        mat.vertexColors = true;
+        mat.needsUpdate = true;
+      };
+      if (Array.isArray(obj.material)) {
+        obj.material.forEach(applyVC);
+      } else {
+        applyVC(obj.material);
+      }
+    });
+
+    // 清除 OutlinePass，避免与顶点色冲突
+    if (this.outlinePass) {
+      this.outlinePass.selectedObjects = [];
+    }
+
+    console.log(`[OffscreenRenderModel] applyFaceSegmentation 完成，共 ${segIds.length} 个分割块`);
+  }
+
+  /**
+   * 高亮指定分割块（选中块保持原色，其余块 RGB × 0.3 暗化）。
+   * targetSegId 为 null 时恢复全色。
+   * @param {number|null} targetSegId
+   */
+  _highlightSegment(targetSegId) {
+    if (!this._segState) return;
+    const { faceLabels, segmentColors } = this._segState;
+
+    this.scene.traverse(obj => {
+      if (!(obj instanceof THREE.Mesh)) return;
+      const geo = obj.geometry;
+      if (!geo) return;
+      const colorAttr = geo.getAttribute('color');
+      if (!colorAttr) return;
+
+      const posAttr = geo.getAttribute('position');
+      const vertexCount = posAttr.count;
+      const colorArray = new Float32Array(colorAttr.array);
+
+      const setFaceColor = (fi, color) => {
+        if (geo.index) {
+          const idx = geo.index;
+          for (let k = 0; k < 3; k++) {
+            const vi = idx.getX(fi * 3 + k);
+            colorArray[vi * 3]     = color.r;
+            colorArray[vi * 3 + 1] = color.g;
+            colorArray[vi * 3 + 2] = color.b;
+          }
+        } else {
+          for (let k = 0; k < 3; k++) {
+            const vi = fi * 3 + k;
+            colorArray[vi * 3]     = color.r;
+            colorArray[vi * 3 + 1] = color.g;
+            colorArray[vi * 3 + 2] = color.b;
+          }
+        }
+      };
+
+      const faceCount = geo.index
+        ? Math.floor(geo.index.count / 3)
+        : Math.floor(vertexCount / 3);
+
+      for (let f = 0; f < faceCount; f++) {
+        const segId = faceLabels[f] ?? 0;
+        let color;
+        if (targetSegId === null || segId === targetSegId) {
+          color = new THREE.Color(segmentColors.get(segId) ?? '#888888');
+        } else {
+          const base = new THREE.Color(segmentColors.get(segId) ?? '#888888');
+          color = new THREE.Color(base.r * 0.3, base.g * 0.3, base.b * 0.3);
+        }
+        setFaceColor(f, color);
+      }
+
+      colorAttr.array.set(colorArray);
+      colorAttr.needsUpdate = true;
+    });
+  }
+
+  /**
+   * 高亮指定分割块并进行多视角截图，截图后恢复全色。
+   * 调用前须先调用 applyFaceSegmentation()。
+   * @param {number} segId - 要截图的分割块 ID
+   * @param {string[]} viewKeys - 视角列表
+   * @returns {Promise<string[]>} DataURL 数组
+   */
+  async captureSegmentWithViews(segId, viewKeys = ['main']) {
+    if (!this._segState) {
+      throw new Error('请先调用 applyFaceSegmentation() 初始化分割状态');
+    }
+
+    console.log(`[OffscreenRenderModel] ===== 开始捕获分割块 segId=${segId} =====`);
+    const images = [];
+
+    this._highlightSegment(segId);
+
+    try {
+      for (let i = 0; i < viewKeys.length; i++) {
+        const viewKey = viewKeys[i];
+        console.log(`[OffscreenRenderModel] 设置视角 [${i + 1}/${viewKeys.length}]: ${viewKey}`);
+
+        this.setCameraView(viewKey);
+        await new Promise(resolve => setTimeout(resolve, 100));
+        this.render();
+
+        const dataURL = await this.captureToDataURL();
+        console.log(`[OffscreenRenderModel] 分割块 ${segId} 视角 ${viewKey} 截图大小: ${dataURL.length} bytes`);
+        images.push(dataURL);
+
+        if (this.enableDebugScreenshots) {
+          await this.saveDebugImage(dataURL, `seg${segId}_${viewKey}.png`);
+        }
+      }
+    } finally {
+      this._highlightSegment(null);
+    }
+
+    console.log(`[OffscreenRenderModel] 分割块 ${segId} 成功捕获 ${images.length} 张图片`);
+    return images;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+
   /**
    * 应用语义标签到模型
    * @param {Array} batchResults - 批量标注结果 [{materialName, targetMaterialName, label}, ...]

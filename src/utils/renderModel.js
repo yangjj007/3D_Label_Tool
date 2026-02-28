@@ -1633,6 +1633,12 @@ class renderModel {
     this.renderer.domElement.addEventListener('click', clickHandler);
     this._segClickHandler = clickHandler;
 
+    // 进入分割模式：清空 OutlinePass 选择，防止与顶点色高亮冲突
+    if (this.outlinePass) {
+      this.outlinePass.selectedObjects = [];
+    }
+    this._segmentationMode = true;
+
     return {
       segmentCount: segIds.length,
       segmentColors,
@@ -1731,6 +1737,7 @@ class renderModel {
     });
 
     this._segState = null;
+    this._segmentationMode = false;
   }
 
   /**

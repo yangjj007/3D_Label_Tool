@@ -336,6 +336,11 @@ export default class MaterialModules {
 
       raycaster.setFromCamera(mouse, camera);
 
+      // 若当前处于分割掩码模式，禁用 OutlinePass 选中，交由分割点击处理器独立处理
+      if (store.modelApi._segmentationMode) {
+        return false;
+      }
+
       let model = store.modelApi.model;
       if (geometryGroup.children.length) {
         model = geometryGroup;

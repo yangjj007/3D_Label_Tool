@@ -64,7 +64,6 @@
               @batch-download="handleBatchDownload"
               @batch-delete="handleBatchDelete"
               @batch-tag="handleBatchTagging"
-              @batch-segment="handleBatchSegment"
             />
           </div>
           <div v-show="activeLeftTab === 'modelChoose'" class="panel-content">
@@ -577,10 +576,12 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys }) => 
     }
     console.log(`[批量打标] 下载完成，成功: ${downloadResults.filter(r => r.status === 'fulfilled').length}/${filesToDownload.length}`);
     
-    // 5. 立即预加载下一页（如果存在）
+    // 5. 立即预加载下一页模型 + 后台触发下一页分割（流水线）
     const currentBatchNumber = currentPageVal;
     if (response.total > currentPageVal * pageSizeVal) {
       preloadNextBatch(currentPageVal + 1, pageSizeVal);
+      // 流水线：在打标当前页的同时，后台预分割下一页的 raw 文件
+      preSegmentNextBatch(currentPageVal + 1, pageSizeVal);
     }
 
     // 6. 更新fileStore，使用IndexedDB中的文件
@@ -751,9 +752,7 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys }) => 
       file.status = 'processing';
       
       let images = [];
-      let materialNames = [];
-      let targetMaterialNames = [];
-      let materials = []; // 移到外层作用域
+      let segmentIds = []; // 记录每组截图对应的 segId（替代原 materialNames）
       
       // 使用离屏渲染模式
       if (renderPool) {
@@ -792,23 +791,32 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys }) => 
           const loadTime = Date.now() - loadStartTime;
           console.log(`[批量打标] 模型加载成功 (耗时: ${loadTime}ms)`);
           
-          // 3. 获取材质列表并截图
-          materials = offscreenRenderer.getMaterialList();
-          console.log(`[批量打标] 找到 ${materials.length} 个材质`);
-          if (!materials.length) throw new Error("未找到材质");
-          
-          console.log(`[批量打标] 开始截图，视角: ${viewKeys.join(', ')}`);
-          for (const mesh of materials) {
-            console.log(`[批量打标] 正在为材质 ${mesh.name || mesh.uuid} 截图...`);
-            const imgs = await offscreenRenderer.captureMultiAngleMaterial(mesh, viewKeys);
+          // 3. 获取分割掩码并按 segId 截图
+          const serverFileId = file.serverFileId || file.id;
+          console.log(`[批量打标] 获取分割掩码，serverFileId: ${serverFileId}`);
+          const faceLabels = await getSegmentFaceLabels(serverFileId);
+          if (!faceLabels || !faceLabels.length) {
+            throw new Error("未找到分割掩码，请先完成模型分割");
+          }
+          console.log(`[批量打标] 分割掩码已加载，面数: ${faceLabels.length}`);
+
+          // 应用分割掩码到离屏渲染器（写入顶点色）
+          offscreenRenderer.applyFaceSegmentation(faceLabels);
+
+          // 获取所有唯一 segId 并逐个截图
+          const uniqueSegIds = [...new Set(faceLabels)].sort((a, b) => a - b);
+          console.log(`[批量打标] 分割块数: ${uniqueSegIds.length}，开始截图，视角: ${viewKeys.join(', ')}`);
+
+          for (const segId of uniqueSegIds) {
+            console.log(`[批量打标] 正在为分割块 segId=${segId} 截图...`);
+            const imgs = await offscreenRenderer.captureSegmentWithViews(segId, viewKeys);
             
             if (imgs && imgs.length > 0) {
-              console.log(`[批量打标] 材质 ${mesh.name || mesh.uuid} 截图成功，共 ${imgs.length} 张`);
+              console.log(`[批量打标] 分割块 segId=${segId} 截图成功，共 ${imgs.length} 张`);
               images.push(imgs);
-              materialNames.push(mesh.name || mesh.uuid);
-              targetMaterialNames.push(mesh.material?.name);
+              segmentIds.push(segId);
             } else {
-              console.warn(`[批量打标] 材质 ${mesh.name || mesh.uuid} 截图为空`);
+              console.warn(`[批量打标] 分割块 segId=${segId} 截图为空`);
             }
           }
         } finally {
@@ -845,7 +853,7 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys }) => 
         }
       };
       
-      console.log(`[批量打标] 准备 VLM 请求，共 ${images.length} 个材质`);
+      console.log(`[批量打标] 准备 VLM 请求，共 ${images.length} 个分割块`);
       const requests = images.map(imgs => [selectPrompt(), imgs, {}]);
       
       console.log(`[批量打标] 开始调用 VLM API...`);
@@ -866,8 +874,7 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys }) => 
       
       const batchResults = results.map((res, idx) => ({
         ...res,
-        materialName: materialNames[idx],
-        targetMaterialName: targetMaterialNames[idx],
+        segId: segmentIds[idx],
         label: res.text // 确保有 label 字段
       }));
 
@@ -879,8 +886,8 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys }) => 
       console.log(`[批量打标] VLM结果统计: 成功 ${successCount}/${totalMatCount}, 失败 ${failureCount}`);
       
       if (successCount === 0) {
-        console.warn(`[批量打标] ⚠️ 文件 ${file.name} 所有材质标签生成失败，跳过处理`);
-        ElMessage.warning(`文件 ${file.name} 所有材质标签生成失败，已跳过`);
+        console.warn(`[批量打标] ⚠️ 文件 ${file.name} 所有分割块标签生成失败，跳过处理`);
+        ElMessage.warning(`文件 ${file.name} 所有分割块标签生成失败，已跳过`);
         
         await deleteModelFile(file.id);
         file.status = 'skipped';
@@ -889,8 +896,8 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys }) => 
       }
       
       if (failureCount > 0) {
-        console.warn(`[批量打标] ⚠️ 文件 ${file.name} 有 ${failureCount} 个材质标签生成失败，仍继续处理成功的 ${successCount} 个`);
-        ElMessage.warning(`文件 ${file.name}: ${failureCount} 个材质失败，${successCount} 个成功`);
+        console.warn(`[批量打标] ⚠️ 文件 ${file.name} 有 ${failureCount} 个分割块标签生成失败，仍继续处理成功的 ${successCount} 个`);
+        ElMessage.warning(`文件 ${file.name}: ${failureCount} 个分割块失败，${successCount} 个成功`);
       }
 
       // 3. 渲染整体模型多视角图（新格式）
@@ -939,34 +946,25 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys }) => 
         const fileData = await getModelFile(file.id);
         const originalBlob = fileData.fileBlob;
         
-        const modelId = file.id || file.name.replace(/\.(glb|gltf)$/i, '');
+        const validResults = batchResults.filter(res => !res.error && res.text);
         const infoData = {
           modelName: file.name,
           fileSize: originalBlob.size,
           createdAt: new Date().toISOString(),
           overallLabel: overallLabel || '未生成整体标签',
-          // 新格式：segments 数组（兼容 PartField 分割 ID）
-          segments: batchResults
-            .filter(res => !res.error && res.text)
-            .map((res, idx) => ({
-              id: idx,
-              name: res.materialName || `segment_${idx}`,
-              label: res.text || '',
-              color: '#888888'
-            })),
-          // 兼容旧格式保留 materials 字段
-          materials: batchResults
-            .filter(res => !res.error && res.text)
-            .map((res, idx) => ({
-              name: res.materialName || `material_${idx}`,
-              uuid: materials[idx]?.uuid || '',
-              label: res.text || ''
-            })),
+          // segments 按 segId 索引（来自分割掩码）
+          segments: validResults.map(res => ({
+            id: res.segId,
+            name: `segment_${res.segId}`,
+            label: res.text || '',
+            color: '#888888'
+          })),
           metadata: {
             hasLabels: true,
             updatedAt: new Date().toISOString(),
             viewKeys: viewKeys,
-            segmentCount: batchResults.filter(res => !res.error && res.text).length
+            segmentCount: validResults.length,
+            sourceMask: true // 标记为掩码来源
           }
         };
         
@@ -979,24 +977,24 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys }) => 
             viewKey: viewKeys[idx] || `view_${idx}`,
             dataURL
           })),
-          materials: []
+          segments: []
         };
         
-        // 添加材质视角图
+        // 添加分割块多视角图（键名：image_segments_{segId}_{viewKey}）
         for (let i = 0; i < images.length; i++) {
-          const materialName = materialNames[i];
-          const materialImages = images[i];
+          const segId = segmentIds[i];
+          const segImages = images[i];
           
-          for (let j = 0; j < materialImages.length; j++) {
-            imageData.materials.push({
-              materialName: materialName,
+          for (let j = 0; j < segImages.length; j++) {
+            imageData.segments.push({
+              segId: segId,
               viewKey: viewKeys[j] || `view_${j}`,
-              dataURL: materialImages[j]
+              dataURL: segImages[j]
             });
           }
         }
         
-        console.log(`[批量打标] 图片数据准备完成，整体: ${imageData.overall.length} 张，材质: ${imageData.materials.length} 张`);
+        console.log(`[批量打标] 图片数据准备完成，整体: ${imageData.overall.length} 张，分割块: ${imageData.segments.length} 张`);
         
         // 7. 上传文件夹数据到服务器
         console.log(`[批量打标] 开始上传文件夹结构到服务器...`);
@@ -1141,6 +1139,24 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys }) => 
   
   // 刷新文件列表状态（如果需要）
   await loadPersistedFiles();
+};
+
+// 预分割下一批次（流水线：打标当前页时，后台触发下一页的服务端分割）
+const preSegmentNextBatch = async (batchNumber, pageSize, numClusters = 10, method = 'agglomerative') => {
+  try {
+    const response = await getServerFileList('raw', batchNumber, pageSize);
+    const rawFiles = response.files || [];
+    if (!rawFiles.length) return;
+    console.log(`[流水线分割] 触发第 ${batchNumber} 页 ${rawFiles.length} 个文件的后台分割`);
+    // fire-and-forget：不等待完成，让服务端后台处理
+    rawFiles.forEach(file => {
+      triggerSegmentation(file.id, numClusters, method).catch(err => {
+        console.warn(`[流水线分割] 文件 ${file.name} 分割触发失败:`, err.message || err);
+      });
+    });
+  } catch (error) {
+    console.warn('[流水线分割] 获取下一页文件列表失败，跳过预分割:', error.message || error);
+  }
 };
 
 // 预加载下一批次

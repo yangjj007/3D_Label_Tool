@@ -375,25 +375,32 @@ export async function healthCheck() {
 /** @deprecated 使用 saveModelLabels */
 export async function saveLabeledFolder(modelName, _glbBlob, infoData, images) {
   const modelId = modelName.replace(/\.(glb|gltf)$/i, '');
-  // 转换旧 materials 图片格式 → 新 segments 格式
+
+  // 图片：优先使用新 segments 格式（来自掩码打标），回退兼容旧 materials 格式
   const convertedImages = {
     overview: images?.overall || [],
-    segments: (images?.materials || []).map(img => ({
-      segId: img.materialName?.replace(/[^a-zA-Z0-9_-]/g, '_') || '0',
-      viewKey: img.viewKey,
-      dataURL: img.dataURL
-    }))
+    segments: images?.segments?.length
+      ? images.segments
+      : (images?.materials || []).map(img => ({
+          segId: img.materialName?.replace(/[^a-zA-Z0-9_-]/g, '_') || '0',
+          viewKey: img.viewKey,
+          dataURL: img.dataURL
+        }))
   };
-  // 转换旧 materials 格式 → 新 segments 格式
+
+  // infoData：优先使用新 segments 字段，回退兼容旧 materials 字段
   const convertedInfo = {
     ...infoData,
-    segments: infoData.materials?.map((m, i) => ({
-      id: i,
-      label: m.label || '',
-      color: m.color || '#888888',
-      name: m.name
-    })) || infoData.segments || []
+    segments: infoData.segments?.length
+      ? infoData.segments
+      : (infoData.materials || []).map((m, i) => ({
+          id: i,
+          label: m.label || '',
+          color: m.color || '#888888',
+          name: m.name
+        }))
   };
+
   return saveModelLabels(modelId, convertedInfo, convertedImages);
 }
 
