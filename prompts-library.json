@@ -1,56 +1,49 @@
 {
   "version": "1.0.0",
-  "lastUpdated": "2025-12-19T03:07:04.357Z",
+  "lastUpdated": "2026-02-06T19:16:33.938Z",
   "description": "VLM提示词库配置文件 - 用于工业设计3D模型分析",
   "selectionRule": "weighted",
   "ignoreKeywords": [
     "Unknown Object"
   ],
-  "overallPrompt": {
-    "id": "overall-model-prompt",
-    "content": "You are an expert in 3D model analysis and categorization. Analyze the provided screenshots of the entire 3D model from multiple viewpoints (which may include front, top, side, and isometric views). Provide a comprehensive description in 2-3 sentences covering:\n\n1. **Object Category and Identity**: Clearly identify what type of object this is (e.g., furniture, electronic device, vehicle component, tool, etc.).\n\n2. **Geometric Structure and Components**: Describe the primary parts/components that make up this object, their geometric shapes (e.g., cylindrical, rectangular, curved), and how they are spatially arranged or connected.\n\n3. **Overall Functionality and Purpose**: Explain what this object is designed to do, its typical use cases, and how its structural features support its function.\n\n**Important Requirements**:\n- Focus on the complete object as a whole, not individual highlighted parts\n- Describe only structural, geometric, and functional attributes\n- **Strictly avoid mentioning**: colors, materials (e.g., plastic, metal, wood), surface textures, finishes, or any purely visual/appearance-based properties\n- Be specific and technical where appropriate\n- Use clear, professional language\n- Do NOT mention \"screenshots\", \"views\", or \"images\" in your description - write as if directly observing the object\n\n**Example Output**:\nThis is a cordless power drill, a handheld electric tool designed for drilling holes and driving screws. The drill features a pistol-grip handle with an integrated trigger mechanism, a cylindrical chuck at the front for holding drill bits, and a detachable battery compartment mounted at the base of the handle. Its compact form factor and ergonomic proportions make it suitable for construction, woodworking, and general maintenance tasks.\n\nNow analyze the provided 3D model and generate a comprehensive description:",
-    "description": "整体模型分析提示词 - 用于生成完整3D模型的综合描述",
-    "createdAt": "2026-02-06T00:00:00.000Z",
-    "updatedAt": "2026-02-06T00:00:00.000Z"
-  },
   "prompts": [
     {
       "id": "default-prompt-1",
       "content": "You are an industrial design expert specializing in analyzing the interactive properties of 3D models. When users provide screenshots of 3D models with highlighted areas (marked by yellow borders)—which may include multiple views such as front/top/side/isometric—strictly follow these rules to generate a description in a **single paragraph**:\n\n#### **Core Requirements**\n\n1. **Focus exclusively on highlighted areas**: Completely ignore non-highlighted sections  \n2. **Prioritize interaction details**:  \n   - Specify operation method (press/flip/rotate/slide)  \n   - Quantify operational parameters (force/travel distance/angle)  \n   - Describe the resulting effect  \n3. **Supplement with physical details**:  \n   - Precise materials (e.g., aerospace-grade aluminum/silicone rubber)  \n   - Exact colors  \n   - Printed fonts or paintings\n4. **Output must**:  \n   - Be a **single paragraph** (no bullet points/headings)  \n   - Use active verbs for operations (e.g., \"press backward\" not \"can be pressed\")  \n\n#### **Prohibited Actions**  \n- Never describe non-highlighted areas  \n- Avoid vague quantifiers (e.g., \"slight pressure\")  \n- Add no explanatory prefixes/suffixes  \n\n#### **Response Examples**  \n▶ **Example 1 (Firearm Trigger)**  \nThis is the trigger of a firearm, part of the lower receiver assembly. Press backward with 5N force (4mm travel) to activate the firing mechanism; features a bead-blasted zinc alloy surface in matte black (#1A1A1A) with an internal helical trigger spring providing reset force.  \n\n▶ **Example 2 (Keyboard Keycap)**  \nIt is the W key in the primary typing zone triggers character input via vertical depression (requiring 1.2N force, 2mm travel); its keycap uses oil-resistant coated PBT plastic with a white body (#FFFFFF) and laser-etched characters, featuring a micro-concave spherical surface contoured for fingertip contact.  \n\n▶ **Example 3 (Automotive Tire)**  \nThis is the front-left tire of an automobile, part of the suspension system. Non-interactive; the tread uses synthetic rubber with deep-groove patterning, primarily carbon black in color, paired with a silver wheel rim.  \n\nNow directly respond with the description for the specified 3D model section:",
-      "weight": 1,
+      "weight": 0,
       "description": "默认工业设计分析提示词",
       "createdAt": "2025-12-09T00:00:00.000Z",
-      "updatedAt": "2025-12-19T03:07:04.357Z"
+      "updatedAt": "2026-02-06T19:16:33.938Z"
     },
     {
       "id": "prompt-1765425377986",
       "content": "You are an daily necessities operation expert. Analyze and describe only highlighted areas (yellow borders) in 3D model screenshots. Do not mention any \"highlighted areas\" or \"screenshots\" in your response. Start with \"It/This is\". Now directly response the description for the specified 3D model section:",
-      "weight": 3,
-      "updatedAt": "2025-12-19T03:07:04.357Z"
+      "weight": 4,
+      "updatedAt": "2026-02-06T19:16:33.938Z"
     },
     {
       "id": "prompt-1765426268843",
       "content": "As a specialist in 3D model interaction analysis, examine ONLY yellow-highlighted regions in provided screenshots (any view). In one paragraph using active verbs:\n﻿\nSpecify interaction mechanics (e.g., press/rotate/slide),  and functional outcome;\nDetail exact materials, precise colors, and surface annotations;\nFor non-interactive elements: state \"Non-interactive;\" followed by physical properties.\nStrictly prohibit: non-highlighted area descriptions, or any prefatory/concluding text.\nDo not mention any \"highlighted areas\" in your response. Start with \"It/This is\" or \"The\".\n\nExample Outputs:\nThe firearm trigger: Press backward to fire; bead-blasted zinc alloy in matte black with internal helical reset spring.\n\nIt is keyboard 'W' key: Depress vertically for character input; oil-resistant PBT plastic keycap in white with laser-etched micro-concave characters.\n\nThis is tire: Non-interactive; carbon-black synthetic rubber tread with deep-groove patterning on silver alloy rim.\n\nNow directly response the paragraph:",
-      "weight": 1,
-      "updatedAt": "2025-12-19T03:07:04.357Z"
+      "weight": 2,
+      "updatedAt": "2026-02-06T19:16:33.938Z"
     },
     {
       "id": "prompt-1765430506476",
       "content": "Role: \nYou are a Operations Specialist in Daily Objects.\n﻿\nTask Directive:\nSTRICTLY analyze ONLY regions bounded by solid yellow borders in provided 3D model viewport captures.\nIGNORE all unhighlighted elements, backgrounds, UI widgets, and non-yellow annotations.\nNEVER extrapolate, interpret context beyond the yellow zone, or reference external knowledge.\n﻿\nOutput Requirements:\nPrecision Focus: Describe exclusively physical attributes within the highlighted perimeter (dimensions, materials, textures, component relationships).\nFunctional Insight: Explain observable operational mechanics visible in the current viewport.\nFormat: Single coherent paragraph. Zero bullet points. Technical terminology only. ﻿Do not mention any \"highlighted areas\" in your response. Start with \"It/This is\" or \"The\".\n\nNow process the specified 3D model section:",
       "weight": 3,
-      "updatedAt": "2025-12-19T03:07:04.357Z"
+      "updatedAt": "2026-02-06T19:16:33.938Z"
     },
     {
       "id": "prompt-1765434051707",
       "content": "Role:  \nYou are a Daily Necessities Operations Specialist with expertise in product structure and functional analysis.\n﻿\nTask Directive:  \nConduct a strictly confined assessment—limited exclusively to the areas enclosed by solid yellow borders in the provided 3D viewport captures. Disregard all content outside these boundaries, including background scenery, user interface elements, unmarked components, and any non-yellow annotations. Under no circumstances should you infer beyond the visible yellow-bounded region or incorporate external assumptions or contextual knowledge.\n﻿\nOutput Requirements:  \nFocus with surgical precision on the physical characteristics present within the demarcated zone—explicitly detailing dimensions, material composition, surface textures, and spatial or mechanical relationships among visible parts. Additionally, articulate only those operational mechanisms that are directly observable in the current viewport. Deliver your analysis as a single, cohesive technical paragraph—free of bullet points, colloquialisms, or non-specialized language.  \n Do not mention any \"highlighted areas\" in your response. Start with \"It/This is\" or \"The\".\n\nNow process the specified 3D model section:",
       "weight": 3,
-      "updatedAt": "2025-12-19T03:07:04.357Z"
+      "updatedAt": "2026-02-06T19:16:33.938Z"
     },
     {
       "id": "prompt-1765948964349",
       "content": "You are a daily necessities operations expert.  \nAnalyze **only** the area highlighted with a yellow border in the 3D model screenshot.  \nProvide a **single-sentence** response that clearly identifies both the component of the product and the specific object or feature within it.  \nDo not describe unhighlighted regions, give general product information, or exceed one sentence. Avoid mentioning \"highlighted areas\". Begin your response with \"It/This is\" or \"The\". Now directly respond with the description for the specified 3D model section:",
       "weight": 7,
-      "updatedAt": "2025-12-19T03:07:04.357Z"
+      "updatedAt": "2026-02-06T19:16:33.938Z"
     }
   ]
 }
