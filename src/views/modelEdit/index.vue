@@ -791,9 +791,13 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys }) => 
           const loadTime = Date.now() - loadStartTime;
           console.log(`[批量打标] 模型加载成功 (耗时: ${loadTime}ms)`);
           
-          // 3. 获取分割掩码并按 segId 截图
+          // 3. 确保模型已分割（若未分割则自动触发并等待完成）
           const serverFileId = file.serverFileId || file.id;
-          console.log(`[批量打标] 获取分割掩码，serverFileId: ${serverFileId}`);
+          console.log(`[批量打标] 确保分割完成，serverFileId: ${serverFileId}`);
+          await waitForSegmentation(serverFileId);
+
+          // 4. 获取分割掩码
+          console.log(`[批量打标] 获取分割掩码`);
           const faceLabels = await getSegmentFaceLabels(serverFileId);
           if (!faceLabels || !faceLabels.length) {
             throw new Error("未找到分割掩码，请先完成模型分割");
@@ -1142,6 +1146,63 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys }) => 
 };
 
 // 预分割下一批次（流水线：打标当前页时，后台触发下一页的服务端分割）
+/**
+ * 确保模型已完成分割。若尚未分割则自动触发，然后轮询直到完成。
+ * @param {string} modelId
+ * @param {number} numClusters
+ * @param {string} method
+ * @param {number} timeoutMs  最长等待时间（默认 10 分钟）
+ * @returns {Promise<void>}  resolve 表示分割完成，reject 表示超时或分割失败
+ */
+const waitForSegmentation = async (modelId, numClusters = 10, method = 'agglomerative', timeoutMs = 600000) => {
+  const POLL_INTERVAL = 5000;
+  const deadline = Date.now() + timeoutMs;
+
+  // 先查询当前状态
+  let statusData;
+  try {
+    statusData = await getSegmentStatus(modelId);
+  } catch (err) {
+    throw new Error(`获取分割状态失败: ${err.message}`);
+  }
+
+  // 如果已有分割结果，直接返回
+  if (statusData.hasSegments || statusData.status === 'segmented') {
+    console.log(`[分割等待] ${modelId} 已有分割数据，跳过`);
+    return;
+  }
+
+  // 若未在进行中，则触发分割
+  if (statusData.status !== 'segmenting') {
+    console.log(`[分割等待] ${modelId} 状态为 "${statusData.status}"，触发分割...`);
+    try {
+      await triggerSegmentation(modelId, numClusters, method);
+    } catch (err) {
+      // 409 = 已在进行中，视为正常
+      if (err?.response?.status !== 409) {
+        throw new Error(`触发分割失败: ${err.message}`);
+      }
+    }
+  } else {
+    console.log(`[分割等待] ${modelId} 已在分割中，等待完成...`);
+  }
+
+  // 轮询直到完成或超时
+  while (Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL));
+    try {
+      const s = await getSegmentStatus(modelId);
+      console.log(`[分割等待] ${modelId} 状态: ${s.status}, hasSegments: ${s.hasSegments}`);
+      if (s.hasSegments || s.status === 'segmented') return;
+      if (s.status === 'segment_failed') throw new Error(`模型 ${modelId} 分割失败`);
+    } catch (pollErr) {
+      if (pollErr.message?.includes('分割失败')) throw pollErr;
+      console.warn(`[分割等待] 轮询状态失败，继续重试:`, pollErr.message);
+    }
+  }
+  throw new Error(`模型 ${modelId} 分割超时（${timeoutMs / 60000} 分钟）`);
+};
+
 const preSegmentNextBatch = async (batchNumber, pageSize, numClusters = 10, method = 'agglomerative') => {
   try {
     const response = await getServerFileList('raw', batchNumber, pageSize);
