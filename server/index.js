@@ -145,6 +145,149 @@ function findOriginalFile(modelId) {
   return files.length > 0 ? path.join(modelDir, files[0]) : null;
 }
 
+// ────────────────────────────────────────────────────────────
+// 支持的 Mesh 文件扩展名
+// ────────────────────────────────────────────────────────────
+const MESH_EXTENSIONS = new Set(['glb', 'gltf', 'obj', 'ply', 'fbx', 'stl', '3ds', 'dae', 'off']);
+
+/**
+ * 根据模型目录现有内容推断状态
+ * labeled > segmented > raw
+ */
+function inferStatus(modelDir) {
+  if (fs.existsSync(path.join(modelDir, 'labels', 'info.json'))) return 'labeled';
+  if (fs.existsSync(path.join(modelDir, 'segments', 'face_labels.json'))) return 'segmented';
+  return 'raw';
+}
+
+/**
+ * 为目录补全 meta.json（仅当不存在时）
+ * @param {string} modelId
+ * @param {string} originalName  原始文件名（含扩展名）
+ * @param {string} ext           扩展名（不含点）
+ * @param {number} size          文件字节数
+ * @param {string} modelDir      模型目录绝对路径
+ */
+function ensureMeta(modelId, originalName, ext, size, modelDir) {
+  const metaPath = path.join(modelDir, 'meta.json');
+  if (fs.existsSync(metaPath)) return;
+  const status = inferStatus(modelDir);
+  const meta = {
+    id: modelId,
+    originalName,
+    ext,
+    size,
+    uploadedAt: new Date().toISOString(),
+    status,
+    filteredAt: null,
+    filterMetrics: null
+  };
+  fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2));
+  console.log(`   📝 已生成 meta.json (status=${status}): ${modelId}`);
+}
+
+/**
+ * 启动时扫描 MODELS_DIR，自动整理游离的 mesh 文件：
+ *
+ * 场景 1：Mesh 文件直接放在 MODELS_DIR 根层（如 files/models/chair.glb）
+ *   → 新建子目录 files/models/chair/，移动为 original.glb，生成 meta.json
+ *
+ * 场景 2：子目录内有 mesh 文件但未命名为 original.*（如 files/models/chair/chair.glb）
+ *   → 重命名为 original.glb，补全 meta.json
+ *
+ * 场景 3：子目录内已有 original.* 文件，但缺少 meta.json
+ *   → 补全 meta.json
+ */
+function scanAndOrganizeOrphanedFiles() {
+  if (!fs.existsSync(MODELS_DIR)) return;
+
+  console.log('\n🔍 扫描游离 Mesh 文件...');
+  let organized = 0;
+
+  const entries = fs.readdirSync(MODELS_DIR);
+
+  // ── 场景 1：MODELS_DIR 根层的裸 mesh 文件 ──────────────────────
+  for (const name of entries) {
+    const fullPath = path.join(MODELS_DIR, name);
+    if (fs.statSync(fullPath).isDirectory()) continue;
+
+    const ext = path.extname(name).slice(1).toLowerCase();
+    if (!MESH_EXTENSIONS.has(ext)) continue;
+
+    const modelId  = path.basename(name, path.extname(name));
+    const modelDir = path.join(MODELS_DIR, modelId);
+    const destPath = path.join(modelDir, `original.${ext}`);
+
+    // 若目标子目录已有同名 original.* 则跳过，避免覆盖
+    if (fs.existsSync(destPath)) {
+      console.log(`   ⚠️  跳过 ${name}（目标 ${modelId}/original.${ext} 已存在）`);
+      continue;
+    }
+
+    if (!fs.existsSync(modelDir)) fs.mkdirSync(modelDir, { recursive: true });
+
+    fs.renameSync(fullPath, destPath);
+    console.log(`   📦 场景1 移动: ${name} → ${modelId}/original.${ext}`);
+
+    const size = fs.statSync(destPath).size;
+    ensureMeta(modelId, name, ext, size, modelDir);
+    organized++;
+  }
+
+  // ── 场景 2 & 3：遍历子目录 ─────────────────────────────────────
+  const dirs = fs.readdirSync(MODELS_DIR).filter(n =>
+    fs.statSync(path.join(MODELS_DIR, n)).isDirectory()
+  );
+
+  for (const dirName of dirs) {
+    const modelDir = path.join(MODELS_DIR, dirName);
+    const modelId  = dirName;
+
+    // 检查是否已有规范的 original.* 文件
+    const existingOriginal = fs.readdirSync(modelDir).find(f => f.startsWith('original.'));
+
+    if (!existingOriginal) {
+      // 场景 2：找到子目录内的非规范 mesh 文件
+      const meshFiles = fs.readdirSync(modelDir).filter(f => {
+        const ext = path.extname(f).slice(1).toLowerCase();
+        return MESH_EXTENSIONS.has(ext) && fs.statSync(path.join(modelDir, f)).isFile();
+      });
+
+      if (meshFiles.length === 0) continue; // 没有 mesh 文件，跳过
+
+      // 优先使用与目录同名的文件，否则取第一个
+      const chosen = meshFiles.find(f => path.basename(f, path.extname(f)) === modelId)
+        || meshFiles[0];
+
+      const ext      = path.extname(chosen).slice(1).toLowerCase();
+      const srcPath  = path.join(modelDir, chosen);
+      const destPath = path.join(modelDir, `original.${ext}`);
+
+      fs.renameSync(srcPath, destPath);
+      console.log(`   🔧 场景2 重命名: ${modelId}/${chosen} → original.${ext}`);
+
+      const size = fs.statSync(destPath).size;
+      ensureMeta(modelId, chosen, ext, size, modelDir);
+      organized++;
+    } else {
+      // 场景 3：已有 original.*，只需补全 meta.json
+      const ext      = path.extname(existingOriginal).slice(1).toLowerCase();
+      const origPath = path.join(modelDir, existingOriginal);
+      const size     = fs.statSync(origPath).size;
+
+      const hadMeta = fs.existsSync(path.join(modelDir, 'meta.json'));
+      ensureMeta(modelId, existingOriginal, ext, size, modelDir);
+      if (!hadMeta) organized++;
+    }
+  }
+
+  if (organized > 0) {
+    console.log(`✅ 共整理 ${organized} 个游离 Mesh 文件\n`);
+  } else {
+    console.log('✅ 未发现游离 Mesh 文件，无需整理\n');
+  }
+}
+
 /** 发送分页响应 */
 function sendPaginated(items, page, pageSize, res) {
   const p = parseInt(page) || 1;
@@ -687,6 +830,9 @@ app.get('/api/health', (req, res) => {
 // ────────────────────────────────────────────────────────────
 // 启动
 // ────────────────────────────────────────────────────────────
+// 启动时扫描并整理游离 Mesh 文件
+scanAndOrganizeOrphanedFiles();
+
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 服务器运行在 http://0.0.0.0:${PORT}`);
   console.log(`📁 模型目录: ${MODELS_DIR}`);
