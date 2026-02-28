@@ -56,8 +56,8 @@ class ModelFilterService {
     
     while (true) {
       try {
-        const response = await axiosWithTimeout.get(`${API_BASE_URL}/files`, {
-          params: { type: 'labeled', page, pageSize }
+        const response = await axiosWithTimeout.get(`${API_BASE_URL}/models`, {
+          params: { status: 'labeled', page, pageSize }
         });
         
         const files = response.data.files || [];
@@ -279,10 +279,8 @@ class ModelFilterService {
       console.log(`[FilterService] 保存指标: ${fileName}`);
       const updatedMetadata = mergeMetrics(file, metrics);
       
-      await axiosWithTimeout.post(`${API_BASE_URL}/update-metadata`, {
-        fileId: file.id,
-        metadata: updatedMetadata,
-        fileType: 'labeled'
+      await axiosWithTimeout.patch(`${API_BASE_URL}/models/${file.id}/meta`, {
+        filterMetrics: updatedMetadata.filterMetrics ?? updatedMetadata
       });
       
       console.log(`[FilterService] ✓ 完成: ${fileName}`);
@@ -375,11 +373,10 @@ class ModelFilterService {
         if (checkResult.passed) {
           console.log(`[FilterService] ✓ ${fileName}: 通过过滤`);
           
-          // 复制到filtered_files
+          // 标记为 filtered
           try {
-            await axiosWithTimeout.post(`${API_BASE_URL}/copy-to-filtered`, {
-              fileId: file.id,
-              sourceType: 'labeled'
+            await axiosWithTimeout.post(`${API_BASE_URL}/models/${file.id}/filter`, {
+              filterMetrics: file.filterMetrics
             });
             
             results.passed++;

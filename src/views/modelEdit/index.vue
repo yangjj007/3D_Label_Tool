@@ -121,7 +121,19 @@ import { MODEL_PREVIEW_CONFIG, MODEL_BASE_DATA, MODEL_DEFAULT_CONFIG, UPDATE_MOD
 import { useMeshEditStore } from "@/store/meshEditStore";
 import { useFileStore } from "@/store/fileStore";
 import { deleteModelFile, listFolderFiles, getModelFile, clearModelFiles, STORAGE_FOLDER, getAllFiles } from "@/utils/filePersistence";
-import { getServerFileList, downloadModelFromServer, moveToLabeled, clearBatchFiles, deleteServerFile, saveLabeledFolder } from "@/utils/serverApi";
+import {
+  getServerFileList,
+  downloadModelFromServer,
+  moveToLabeled,
+  clearBatchFiles,
+  deleteServerFile,
+  saveLabeledFolder,
+  saveModelLabels,
+  triggerSegmentation,
+  getSegmentFaceLabels,
+  getSegmentStatus,
+  updateMetadata
+} from "@/utils/serverApi";
 import * as THREE from "three";
 
 import MultiImageVLM from "@/utils/vlmService";
@@ -451,36 +463,42 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys }) => 
   // 使用 unref 解包可能为 Ref 的属性
   const currentPageVal = unref(fileListRef.value?.currentPage) || 1;
   const pageSizeVal = unref(fileListRef.value?.pageSize) || 10;
-  // 强制使用 raw 类型，确保始终处理未打标文件
-  const fileTypeVal = 'raw';
+  // 处理已分割（segmented）或未分割（raw）的文件
+  const fileTypeVal = 'segmented';
   
   let response; // 将 response 提升到函数作用域
-  let labeledFilesSet = new Set(); // 存储已打标文件名
+  let labeledFilesSet = new Set(); // 存储已打标文件 ID（用于断点续传）
   
   try {
+    // 优先获取已分割的文件；若为空则降级获取 raw 文件
     response = await getServerFileList(fileTypeVal, currentPageVal, pageSizeVal);
-    const rawFiles = response.files || [];
+    let rawFiles = response.files || [];
+    if (!rawFiles.length) {
+      const rawResponse = await getServerFileList('raw', currentPageVal, pageSizeVal);
+      rawFiles = rawResponse.files || [];
+    }
     
     if (!rawFiles.length) {
-      ElMessage.info("当前页没有未打标文件");
+      ElMessage.info("当前页没有可打标的文件（请先上传并分割）");
       return;
     }
 
-    // 2. 从服务器获取labeled_files文件夹中的所有文件名（用于断点续传）
-    console.log(`[批量打标] 检查 labeled_files 中已存在的文件...`);
+    // 2. 获取已打标文件 ID 集合（用于断点续传）
+    console.log(`[批量打标] 检查已存在的已打标文件...`);
     try {
-      const labeledResponse = await getServerFileList('labeled', 1, 10000); // 获取大量文件
+      const labeledResponse = await getServerFileList('labeled', 1, 10000);
       labeledResponse.files.forEach(file => {
-        labeledFilesSet.add(file.name);
+        labeledFilesSet.add(file.id);
+        labeledFilesSet.add(file.name); // 兼容旧数据
       });
-      console.log(`[批量打标] labeled_files 中已有 ${labeledFilesSet.size} 个文件`);
+      console.log(`[批量打标] 已打标文件共 ${labeledFilesSet.size} 个`);
     } catch (labeledErr) {
-      console.warn(`[批量打标] 获取 labeled_files 列表失败，将继续处理:`, labeledErr);
+      console.warn(`[批量打标] 获取已打标列表失败，将继续处理:`, labeledErr);
     }
 
     // 3. 在下载前过滤掉已打标的文件
     const filesToDownload = rawFiles.filter(file => {
-      if (labeledFilesSet.has(file.name)) {
+      if (labeledFilesSet.has(file.id) || labeledFilesSet.has(file.name)) {
         console.log(`[批量打标] 跳过下载文件 ${file.name}: labeled_files中已存在`);
         return false;
       }
@@ -920,11 +938,22 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys }) => 
         const fileData = await getModelFile(file.id);
         const originalBlob = fileData.fileBlob;
         
+        const modelId = file.id || file.name.replace(/\.(glb|gltf)$/i, '');
         const infoData = {
           modelName: file.name,
           fileSize: originalBlob.size,
           createdAt: new Date().toISOString(),
           overallLabel: overallLabel || '未生成整体标签',
+          // 新格式：segments 数组（兼容 PartField 分割 ID）
+          segments: batchResults
+            .filter(res => !res.error && res.text)
+            .map((res, idx) => ({
+              id: idx,
+              name: res.materialName || `segment_${idx}`,
+              label: res.text || '',
+              color: '#888888'
+            })),
+          // 兼容旧格式保留 materials 字段
           materials: batchResults
             .filter(res => !res.error && res.text)
             .map((res, idx) => ({
@@ -936,11 +965,11 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys }) => 
             hasLabels: true,
             updatedAt: new Date().toISOString(),
             viewKeys: viewKeys,
-            materialCount: batchResults.filter(res => !res.error && res.text).length
+            segmentCount: batchResults.filter(res => !res.error && res.text).length
           }
         };
         
-        console.log(`[批量打标] info.json 构建完成，材质数: ${infoData.materials.length}`);
+        console.log(`[批量打标] info.json 构建完成，分割块数: ${infoData.segments.length}`);
         
         // 6. 准备图片数据
         console.log(`[批量打标] 准备图片数据...`);
@@ -1090,10 +1119,9 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys }) => 
     const remainingFiles = (response?.total || 0) - currentPageVal * pageSizeVal;
     ElMessage.info(`当前批次已完成，继续处理剩余 ${remainingFiles} 个文件...`);
     
-    // 继续下一批次 - 保持在raw(未打标)列表
+    // 继续下一批次 - 保持在 segmented（已分割）或 raw 列表
     if (fileListRef.value) {
-      // 确保fileType保持为raw
-      fileListRef.value.fileType = 'raw';
+      fileListRef.value.fileType = 'segmented';
       fileListRef.value.currentPage = currentPageVal + 1;
       await fileListRef.value.loadFileList();
     }

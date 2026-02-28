@@ -1,4 +1,3 @@
-// 加载 .env 文件中的环境变量
 require('dotenv').config();
 
 const express = require('express');
@@ -6,1176 +5,690 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const cors = require('cors');
+const { spawn } = require('child_process');
 
 const app = express();
 
-// 强制要求从环境变量读取端口配置
 if (!process.env.PORT) {
   console.error('❌ 错误: 未设置环境变量 PORT');
-  console.error('请在启动前设置 PORT 环境变量，例如:');
-  console.error('  export PORT=30005');
-  console.error('  或在 .env 文件中配置 PORT=30005');
+  console.error('请在 .env 文件中配置 PORT=30005');
   process.exit(1);
 }
 const PORT = process.env.PORT;
 
-// 配置CORS - 允许所有来源（开发环境）
-// 生产环境建议配置具体的允许来源
 app.use(cors({
   origin: '*',
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'Range'],
   exposedHeaders: ['Content-Range', 'Accept-Ranges', 'Content-Length'],
   credentials: false
 }));
 
-// 配置中间件
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// 配置存储目录 - 使用绝对路径
+// ────────────────────────────────────────────────────────────
+// 目录常量
+// ────────────────────────────────────────────────────────────
 const PROJECT_ROOT = path.resolve(__dirname, '..');
-const FILES_DIR = path.join(PROJECT_ROOT, 'files');
-const RAW_FILES_DIR = path.join(FILES_DIR, 'raw_files');
-const LABELED_FILES_DIR = path.join(FILES_DIR, 'labeled_files');
-const FILTERED_FILES_DIR = path.join(FILES_DIR, 'filtered_files');
+const FILES_DIR     = path.join(PROJECT_ROOT, 'files');
+const MODELS_DIR    = path.join(FILES_DIR, 'models');       // 统一模型目录
 const TEMP_CHUNKS_DIR = path.join(PROJECT_ROOT, 'temp-chunks');
 
-// 确保目录存在
-[FILES_DIR, RAW_FILES_DIR, LABELED_FILES_DIR, FILTERED_FILES_DIR, TEMP_CHUNKS_DIR].forEach(dir => {
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
+[FILES_DIR, MODELS_DIR, TEMP_CHUNKS_DIR].forEach(dir => {
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 });
 
-// 输出目录信息（用于调试）
 console.log('📂 服务器目录配置:');
-console.log(`   工作目录: ${process.cwd()}`);
-console.log(`   服务器文件: ${__dirname}`);
-console.log(`   RAW_FILES目录: ${RAW_FILES_DIR}`);
-console.log(`   LABELED_FILES目录: ${LABELED_FILES_DIR}`);
-console.log(`   FILTERED_FILES目录: ${FILTERED_FILES_DIR}`);
+console.log(`   MODELS_DIR: ${MODELS_DIR}`);
+console.log(`   TEMP_CHUNKS_DIR: ${TEMP_CHUNKS_DIR}`);
 
-// 分块上传配置 - 使用内存存储，然后手动写入文件
+// multer（内存存储，用于分块上传 & 文件保存）
 const uploadChunk = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 100 * 1024 * 1024 } // 每块最大100MB
+  limits: { fileSize: 100 * 1024 * 1024 }
 });
 
-// 获取文件列表（分页）
-app.get('/api/files', (req, res) => {
+// ────────────────────────────────────────────────────────────
+// 工具函数
+// ────────────────────────────────────────────────────────────
+
+/** 递归计算目录大小 */
+function getFolderSize(dirPath) {
+  if (!fs.existsSync(dirPath)) return 0;
+  let total = 0;
+  for (const item of fs.readdirSync(dirPath)) {
+    const itemPath = path.join(dirPath, item);
+    const st = fs.statSync(itemPath);
+    total += st.isDirectory() ? getFolderSize(itemPath) : st.size;
+  }
+  return total;
+}
+
+/** 递归复制目录 */
+function copyDirRecursive(src, dest) {
+  if (!fs.existsSync(dest)) fs.mkdirSync(dest, { recursive: true });
+  for (const item of fs.readdirSync(src)) {
+    const s = path.join(src, item);
+    const d = path.join(dest, item);
+    fs.statSync(s).isDirectory() ? copyDirRecursive(s, d) : fs.copyFileSync(s, d);
+  }
+}
+
+/** 读取 meta.json，不存在则返回默认值 */
+function readMeta(modelId) {
+  const metaPath = path.join(MODELS_DIR, modelId, 'meta.json');
+  if (!fs.existsSync(metaPath)) return null;
+  try { return JSON.parse(fs.readFileSync(metaPath, 'utf8')); }
+  catch { return null; }
+}
+
+/** 写入 meta.json */
+function writeMeta(modelId, data) {
+  const dir = path.join(MODELS_DIR, modelId);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'meta.json'), JSON.stringify(data, null, 2));
+}
+
+/** 将 meta.json + 可选的 labels/info.json 合并为 API 响应对象 */
+function buildModelInfo(modelId) {
+  const meta = readMeta(modelId);
+  if (!meta) return null;
+
+  const modelDir = path.join(MODELS_DIR, modelId);
+  const segDir   = path.join(modelDir, 'segments');
+  const labDir   = path.join(modelDir, 'labels');
+
+  // 分割信息
+  let segConfig = null;
+  const segConfigPath = path.join(segDir, 'config.json');
+  if (fs.existsSync(segConfigPath)) {
+    try { segConfig = JSON.parse(fs.readFileSync(segConfigPath, 'utf8')); } catch {}
+  }
+
+  // 标签信息
+  let labInfo = null;
+  const labInfoPath = path.join(labDir, 'info.json');
+  if (fs.existsSync(labInfoPath)) {
+    try { labInfo = JSON.parse(fs.readFileSync(labInfoPath, 'utf8')); } catch {}
+  }
+
+  const origFile = findOriginalFile(modelId);
+
+  return {
+    id: modelId,
+    name: meta.originalName || modelId,
+    ext: meta.ext || '',
+    size: meta.size || 0,
+    folderSize: getFolderSize(modelDir),
+    uploadedAt: meta.uploadedAt,
+    status: meta.status || 'raw',
+    hasSegments: fs.existsSync(path.join(segDir, 'face_labels.json')),
+    hasLabels: fs.existsSync(labInfoPath),
+    isFiltered: meta.status === 'filtered',
+    filteredAt: meta.filteredAt || null,
+    filterMetrics: meta.filterMetrics || null,
+    overallLabel: labInfo?.overallLabel || null,
+    segments: labInfo?.segments || [],
+    segmentCount: labInfo?.segments?.length || 0,
+    segConfig,
+    isFromServer: true,
+    serverFileId: modelId
+  };
+}
+
+/** 查找模型的原始文件（original.* 或其他扩展名）*/
+function findOriginalFile(modelId) {
+  const modelDir = path.join(MODELS_DIR, modelId);
+  if (!fs.existsSync(modelDir)) return null;
+  const files = fs.readdirSync(modelDir).filter(f => f.startsWith('original.'));
+  return files.length > 0 ? path.join(modelDir, files[0]) : null;
+}
+
+/** 发送分页响应 */
+function sendPaginated(items, page, pageSize, res) {
+  const p = parseInt(page) || 1;
+  const ps = parseInt(pageSize) || 10;
+  const total = items.length;
+  const paged = items.slice((p - 1) * ps, p * ps);
+  res.json({ success: true, total, page: p, pageSize: ps, totalPages: Math.ceil(total / ps), files: paged });
+}
+
+// ────────────────────────────────────────────────────────────
+// GET /api/models  — 获取模型列表
+// 支持 ?status=raw|segmenting|segmented|labeled|filtered|all
+// ────────────────────────────────────────────────────────────
+app.get('/api/models', (req, res) => {
   try {
-    const { type = 'all', page = 1, pageSize = 10 } = req.query;
-    
-    let targetDir;
-    if (type === 'raw') {
-      targetDir = RAW_FILES_DIR;
-    } else if (type === 'labeled') {
-      targetDir = LABELED_FILES_DIR;
-    } else if (type === 'filtered') {
-      targetDir = FILTERED_FILES_DIR;
-    } else {
-      // 合并所有目录的文件
-      const rawFiles = getFilesFromDirectory(RAW_FILES_DIR, 'raw');
-      const labeledFiles = getFilesFromDirectory(LABELED_FILES_DIR, 'labeled');
-      const filteredFiles = getFilesFromDirectory(FILTERED_FILES_DIR, 'filtered');
-      const allFiles = [...rawFiles, ...labeledFiles, ...filteredFiles];
-      
-      return sendPaginatedResponse(allFiles, page, pageSize, res);
+    const { status = 'all', page = 1, pageSize = 10 } = req.query;
+
+    if (!fs.existsSync(MODELS_DIR)) return sendPaginated([], page, pageSize, res);
+
+    let models = fs.readdirSync(MODELS_DIR)
+      .filter(name => fs.statSync(path.join(MODELS_DIR, name)).isDirectory())
+      .map(buildModelInfo)
+      .filter(Boolean);
+
+    if (status !== 'all') {
+      models = models.filter(m => m.status === status);
     }
-    
-    const files = getFilesFromDirectory(targetDir, type);
-    sendPaginatedResponse(files, page, pageSize, res);
-    
-  } catch (error) {
-    console.error('获取文件列表失败:', error);
-    res.status(500).json({ error: error.message });
+
+    // 按上传时间降序
+    models.sort((a, b) => new Date(b.uploadedAt || 0) - new Date(a.uploadedAt || 0));
+
+    sendPaginated(models, page, pageSize, res);
+  } catch (err) {
+    console.error('获取模型列表失败:', err);
+    res.status(500).json({ error: err.message });
   }
 });
 
-// 辅助函数：从目录获取文件列表
-function getFilesFromDirectory(dir, type) {
-  const files = [];
-  
-  if (!fs.existsSync(dir)) {
-    console.warn(`⚠️  目录不存在: ${dir}`);
-    return files;
+// ────────────────────────────────────────────────────────────
+// GET /api/models/:id  — 获取单个模型信息
+// ────────────────────────────────────────────────────────────
+app.get('/api/models/:id', (req, res) => {
+  try {
+    const info = buildModelInfo(req.params.id);
+    if (!info) return res.status(404).json({ error: '模型不存在' });
+    res.json({ success: true, model: info });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-  
-  const allFiles = fs.readdirSync(dir);
-  const fileNames = allFiles.filter(name => !name.endsWith('.json'));
-  console.log(`📁 扫描目录 ${path.basename(dir)}: 总文件=${allFiles.length}, 非JSON文件=${fileNames.length}`);
-  
-  for (const fileName of fileNames) {
-    const filePath = path.join(dir, fileName);
-    const stats = fs.statSync(filePath);
-    
-    // 处理目录（新格式：文件夹结构）
-    if (stats.isDirectory()) {
-      console.log(`📂 发现目录: ${fileName}`);
-      
-      // 检查是否包含 info.json（新格式标识）
-      const infoJsonPath = path.join(filePath, 'info.json');
-      if (fs.existsSync(infoJsonPath)) {
-        try {
-          // 读取 info.json
-          const infoContent = fs.readFileSync(infoJsonPath, 'utf8');
-          const infoData = JSON.parse(infoContent);
-          
-          // 查找 GLB 文件
-          const glbFileName = `${fileName}.glb`;
-          const glbFilePath = path.join(filePath, glbFileName);
-          let glbSize = 0;
-          
-          if (fs.existsSync(glbFilePath)) {
-            glbSize = fs.statSync(glbFilePath).size;
-          }
-          
-          // 计算文件夹总大小
-          const getFolderSize = (dirPath) => {
-            let totalSize = 0;
-            const items = fs.readdirSync(dirPath);
-            for (const item of items) {
-              const itemPath = path.join(dirPath, item);
-              const itemStats = fs.statSync(itemPath);
-              if (itemStats.isDirectory()) {
-                totalSize += getFolderSize(itemPath);
-              } else {
-                totalSize += itemStats.size;
-              }
-            }
-            return totalSize;
-          };
-          
-          const folderSize = getFolderSize(filePath);
-          
-          // 添加文件夹信息
-          files.push({
-            id: fileName,
-            name: `${fileName}.glb`, // 保持与旧格式一致的显示名称
-            size: glbSize,
-            folderSize: folderSize, // 文件夹总大小
-            type: type || 'unknown',
-            status: 'labeled',
-            createdAt: infoData.createdAt || stats.birthtime,
-            updatedAt: infoData.metadata?.updatedAt || stats.mtime,
-            labels: infoData.materials?.map(m => ({ name: m.name, label: m.label })) || [],
-            hasLabels: true,
-            overallLabel: infoData.overallLabel || null, // 整体标签
-            materialCount: infoData.materials?.length || 0, // 材质数量
-            isFolder: true, // 标识为文件夹格式
-            folderPath: filePath, // 文件夹路径
-            isFromServer: true,
-            serverFileId: fileName
-          });
-          
-          console.log(`✓ 文件夹格式（新）: ${fileName}, 材质数: ${infoData.materials?.length || 0}`);
-        } catch (err) {
-          console.warn(`⚠️  读取 info.json 失败: ${infoJsonPath}`, err);
-          // 文件夹格式错误，跳过
-        }
-      } else {
-        console.log(`⏭️  跳过目录（无 info.json）: ${fileName}`);
-      }
-      continue;
-    }
-    
-    // 处理文件（旧格式：直接保存的 GLB 文件）
-    const metadataPath = `${filePath}.json`;
-    
-    let metadata = {
-      name: fileName,
-      size: stats.size,
-      createdAt: stats.birthtime,
-      updatedAt: stats.mtime
-    };
-    
-    // 读取元数据
-    if (fs.existsSync(metadataPath)) {
-      try {
-        const metaContent = fs.readFileSync(metadataPath, 'utf8');
-        const savedMeta = JSON.parse(metaContent);
-        metadata = { ...metadata, ...savedMeta };
-      } catch (err) {
-        console.warn(`读取元数据失败: ${metadataPath}`, err);
-      }
-    }
-    
-    files.push({
-      id: fileName,
-      name: fileName,
-      size: stats.size,
-      type: type || 'unknown',
-      status: metadata.hasLabels ? 'labeled' : 'raw',
-      createdAt: stats.birthtime,
-      updatedAt: metadata.updatedAt || stats.mtime,
-      labels: metadata.labels || [],
-      hasLabels: metadata.hasLabels || false,
-      filterMetrics: metadata.filterMetrics || null,
-      filteredAt: metadata.filteredAt || null,
-      sourceType: metadata.sourceType || null,
-      isFolder: false, // 标识为文件格式（旧）
-      isFromServer: true,
-      serverFileId: fileName
-    });
-    
-    console.log(`✓ 文件格式（旧）: ${fileName}`);
-  }
-  
-  // 按创建时间降序排序
-  files.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-  
-  return files;
-}
+});
 
-// 辅助函数：发送分页响应
-function sendPaginatedResponse(files, page, pageSize, res) {
-  const pageNum = parseInt(page);
-  const pageSizeNum = parseInt(pageSize);
-  const total = files.length;
-  const start = (pageNum - 1) * pageSizeNum;
-  const end = start + pageSizeNum;
-  const paginatedFiles = files.slice(start, end);
-  
-  res.json({
-    success: true,
-    total,
-    page: pageNum,
-    pageSize: pageSizeNum,
-    totalPages: Math.ceil(total / pageSizeNum),
-    files: paginatedFiles
-  });
-}
-
-// 上传文件块
-app.post('/api/upload-chunk', uploadChunk.single('chunk'), (req, res) => {
+// ────────────────────────────────────────────────────────────
+// 分块上传  upload-chunk / check-chunks / merge-chunks
+// ────────────────────────────────────────────────────────────
+app.post('/api/models/upload-chunk', uploadChunk.single('chunk'), (req, res) => {
   try {
     const { fileId, chunkIndex, totalChunks } = req.body;
-    
-    if (!req.file) {
-      return res.status(400).json({ error: '没有接收到文件块' });
-    }
-    
-    if (!fileId) {
-      return res.status(400).json({ error: 'fileId参数缺失' });
-    }
-    
-    // 创建临时块目录
+    if (!req.file) return res.status(400).json({ error: '没有接收到文件块' });
+    if (!fileId)   return res.status(400).json({ error: 'fileId参数缺失' });
+
     const chunkDir = path.join(TEMP_CHUNKS_DIR, fileId);
-    if (!fs.existsSync(chunkDir)) {
-      fs.mkdirSync(chunkDir, { recursive: true });
-    }
-    
-    // 将内存中的文件写入磁盘
-    const chunkPath = path.join(chunkDir, `chunk-${chunkIndex}`);
-    fs.writeFileSync(chunkPath, req.file.buffer);
-    
-    res.json({
-      success: true,
-      message: `块 ${parseInt(chunkIndex) + 1}/${totalChunks} 上传成功`,
-      chunkIndex: parseInt(chunkIndex)
-    });
-  } catch (error) {
-    console.error('上传块失败:', error);
-    res.status(500).json({ error: error.message });
+    if (!fs.existsSync(chunkDir)) fs.mkdirSync(chunkDir, { recursive: true });
+    fs.writeFileSync(path.join(chunkDir, `chunk-${chunkIndex}`), req.file.buffer);
+
+    res.json({ success: true, message: `块 ${parseInt(chunkIndex) + 1}/${totalChunks} 上传成功`, chunkIndex: parseInt(chunkIndex) });
+  } catch (err) {
+    console.error('上传块失败:', err);
+    res.status(500).json({ error: err.message });
   }
 });
 
-// 检查已上传的块
-app.post('/api/check-chunks', (req, res) => {
+app.post('/api/models/check-chunks', (req, res) => {
   try {
     const { fileId, totalChunks } = req.body;
     const chunkDir = path.join(TEMP_CHUNKS_DIR, fileId);
-    
     const uploadedChunks = [];
     if (fs.existsSync(chunkDir)) {
       for (let i = 0; i < totalChunks; i++) {
-        if (fs.existsSync(path.join(chunkDir, `chunk-${i}`))) {
-          uploadedChunks.push(i);
-        }
+        if (fs.existsSync(path.join(chunkDir, `chunk-${i}`))) uploadedChunks.push(i);
       }
     }
-    
-    res.json({
-      success: true,
-      uploadedChunks,
-      shouldResume: uploadedChunks.length > 0
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.json({ success: true, uploadedChunks, shouldResume: uploadedChunks.length > 0 });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
-// 合并文件块
-app.post('/api/merge-chunks', async (req, res) => {
+app.post('/api/models/merge-chunks', async (req, res) => {
   try {
     const { fileId, filename, totalChunks, metadata = {} } = req.body;
-    
+
+    // 从文件名推断 modelId（去掉扩展名）
+    const ext = path.extname(filename).slice(1);  // e.g. 'glb'
+    const modelId = path.basename(filename, path.extname(filename));
+    const modelDir = path.join(MODELS_DIR, modelId);
+    const originalPath = path.join(modelDir, `original.${ext}`);
+
+    if (!fs.existsSync(modelDir)) fs.mkdirSync(modelDir, { recursive: true });
+
     const chunkDir = path.join(TEMP_CHUNKS_DIR, fileId);
-    const finalPath = path.join(RAW_FILES_DIR, filename);
-    
-    // 创建写入流
-    const writeStream = fs.createWriteStream(finalPath);
-    
-    // 按顺序合并所有块
+    const writeStream = fs.createWriteStream(originalPath);
+
     for (let i = 0; i < totalChunks; i++) {
       const chunkPath = path.join(chunkDir, `chunk-${i}`);
-      if (!fs.existsSync(chunkPath)) {
-        throw new Error(`缺少块 ${i}`);
-      }
-      const chunkBuffer = fs.readFileSync(chunkPath);
-      writeStream.write(chunkBuffer);
+      if (!fs.existsSync(chunkPath)) throw new Error(`缺少块 ${i}`);
+      writeStream.write(fs.readFileSync(chunkPath));
     }
-    
     writeStream.end();
-    
+
     await new Promise((resolve, reject) => {
       writeStream.on('finish', resolve);
       writeStream.on('error', reject);
     });
-    
-    // 清理临时块文件
+
     fs.rmSync(chunkDir, { recursive: true, force: true });
-    
-    // 保存元数据
-    const fileStats = fs.statSync(finalPath);
-    const metadataToSave = {
-      ...metadata,
-      filename,
+
+    const fileStats = fs.statSync(originalPath);
+
+    // 创建 meta.json
+    writeMeta(modelId, {
+      id: modelId,
+      originalName: filename,
+      ext,
       size: fileStats.size,
-      uploadTime: new Date().toISOString(),
-      fileId
-    };
-    
-    const metadataPath = finalPath + '.json';
-    fs.writeFileSync(metadataPath, JSON.stringify(metadataToSave, null, 2));
-    
-    res.json({
-      success: true,
-      message: '文件合并成功',
-      filename,
-      size: fileStats.size,
-      path: finalPath
+      uploadedAt: new Date().toISOString(),
+      status: 'raw',
+      filteredAt: null,
+      filterMetrics: null,
+      ...metadata
     });
-    
-  } catch (error) {
-    console.error('合并块失败:', error);
-    res.status(500).json({ error: error.message });
+
+    res.json({ success: true, message: '文件合并成功', modelId, filename, size: fileStats.size });
+  } catch (err) {
+    console.error('合并块失败:', err);
+    res.status(500).json({ error: err.message });
   }
 });
 
-// 下载文件（支持分块下载，支持文件夹格式）
-app.get('/api/download/:fileId', (req, res) => {
-  try {
-    const { fileId } = req.params;
-    
-    let filePath;
-    let fileSource;
-    
-    // 辅助函数：检查文件夹格式（新格式）
-    const checkFolderFormat = (dir) => {
-      // 移除可能的 .glb/.gltf 扩展名得到文件夹名
-      const folderName = fileId.replace(/\.(glb|gltf)$/i, '');
-      const folderPath = path.join(dir, folderName);
-      
-      if (fs.existsSync(folderPath) && fs.statSync(folderPath).isDirectory()) {
-        // 查找文件夹中的 GLB 文件
-        const glbPath = path.join(folderPath, `${folderName}.glb`);
-        if (fs.existsSync(glbPath)) {
-          return glbPath;
-        }
-      }
-      return null;
-    };
-    
-    // 按优先级查找：filtered -> labeled -> raw
-    // 每个目录先尝试文件夹格式，再尝试单个文件格式
-    
-    // 1. Filtered目录
-    filePath = checkFolderFormat(FILTERED_FILES_DIR);
-    if (filePath) {
-      fileSource = 'filtered_files (folder)';
-    } else if (fs.existsSync(path.join(FILTERED_FILES_DIR, fileId))) {
-      filePath = path.join(FILTERED_FILES_DIR, fileId);
-      fileSource = 'filtered_files (file)';
-    }
-    
-    // 2. Labeled目录
-    if (!filePath) {
-      filePath = checkFolderFormat(LABELED_FILES_DIR);
-      if (filePath) {
-        fileSource = 'labeled_files (folder)';
-      } else if (fs.existsSync(path.join(LABELED_FILES_DIR, fileId))) {
-        filePath = path.join(LABELED_FILES_DIR, fileId);
-        fileSource = 'labeled_files (file)';
-      }
-    }
-    
-    // 3. Raw目录
-    if (!filePath) {
-      if (fs.existsSync(path.join(RAW_FILES_DIR, fileId))) {
-        filePath = path.join(RAW_FILES_DIR, fileId);
-        fileSource = 'raw_files';
-      }
-    }
-    
-    if (!filePath) {
-      console.error(`[下载] 文件未找到: ${fileId}`);
-      return res.status(404).json({ error: '文件不存在' });
-    }
-    
-    console.log(`[下载] 文件: ${fileId}, 来源: ${fileSource}, 大小: ${fs.statSync(filePath).size} bytes`);
-    
-    const stats = fs.statSync(filePath);
-    const fileSize = stats.size;
-    const range = req.headers.range;
-    
-    if (range) {
-      // 支持分块下载
-      const parts = range.replace(/bytes=/, '').split('-');
-      const start = parseInt(parts[0], 10);
-      const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-      const chunkSize = (end - start) + 1;
-      
-      const fileStream = fs.createReadStream(filePath, { start, end });
-      
-      res.writeHead(206, {
-        'Content-Range': `bytes ${start}-${end}/${fileSize}`,
-        'Accept-Ranges': 'bytes',
-        'Content-Length': chunkSize,
-        'Content-Type': 'application/octet-stream'
-      });
-      
-      fileStream.pipe(res);
-    } else {
-      // 完整下载
-      res.writeHead(200, {
-        'Content-Length': fileSize,
-        'Content-Type': 'application/octet-stream',
-        'Content-Disposition': `attachment; filename="${fileId}"`
-      });
-      
-      const fileStream = fs.createReadStream(filePath);
-      fileStream.pipe(res);
-    }
-    
-  } catch (error) {
-    console.error('下载文件失败:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// 批量下载文件信息
-app.post('/api/batch-download', (req, res) => {
-  try {
-    const { fileIds } = req.body;
-    
-    if (!Array.isArray(fileIds)) {
-      return res.status(400).json({ error: 'fileIds必须是数组' });
-    }
-    
-    const filesInfo = fileIds.map(fileId => {
-      // 按优先级查找：filtered -> labeled -> raw
-      let filePath;
-      let type;
-      
-      if (fs.existsSync(path.join(FILTERED_FILES_DIR, fileId))) {
-        filePath = path.join(FILTERED_FILES_DIR, fileId);
-        type = 'filtered';
-      } else if (fs.existsSync(path.join(LABELED_FILES_DIR, fileId))) {
-        filePath = path.join(LABELED_FILES_DIR, fileId);
-        type = 'labeled';
-      } else if (fs.existsSync(path.join(RAW_FILES_DIR, fileId))) {
-        filePath = path.join(RAW_FILES_DIR, fileId);
-        type = 'raw';
-      } else {
-        return { id: fileId, error: '文件不存在' };
-      }
-      
-      const stats = fs.statSync(filePath);
-      
-      return {
-        id: fileId,
-        name: fileId,
-        size: stats.size,
-        type,
-        downloadUrl: `/api/download/${fileId}`
-      };
-    });
-    
-    res.json({
-      success: true,
-      files: filesInfo
-    });
-    
-  } catch (error) {
-    console.error('批量下载信息获取失败:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// 移动到已打标
-app.post('/api/move-to-labeled', uploadChunk.single('file'), async (req, res) => {
-  try {
-    const { fileId, metadata: metadataStr } = req.body;
-    const metadata = metadataStr ? JSON.parse(metadataStr) : {};
-    
-    const rawPath = path.join(RAW_FILES_DIR, fileId);
-    const labeledPath = path.join(LABELED_FILES_DIR, fileId);
-    
-    console.log(`[move-to-labeled] 开始处理文件: ${fileId}`);
-    console.log(`[move-to-labeled] 是否上传了新文件: ${!!req.file}, 文件大小: ${req.file?.size || 'N/A'} bytes`);
-    
-    if (req.file) {
-      // 如果上传了新文件（已打标的版本），使用新文件
-      fs.writeFileSync(labeledPath, req.file.buffer);
-      console.log(`[move-to-labeled] 新文件已写入 labeled_files: ${labeledPath}, 大小: ${req.file.size} bytes`);
-      console.log(`[move-to-labeled] raw_files 中的原文件已保留: ${rawPath}`);
-      
-      // 不再删除raw目录中的旧文件，保留原始文件
-    } else if (fs.existsSync(rawPath)) {
-      // 否则复制原文件（而不是移动）
-      fs.copyFileSync(rawPath, labeledPath);
-      console.log(`[move-to-labeled] 原文件已复制到 labeled_files: ${labeledPath}`);
-      console.log(`[move-to-labeled] raw_files 中的原文件已保留: ${rawPath}`);
-      
-      // 复制元数据文件
-      const rawMetaPath = rawPath + '.json';
-      const labeledMetaPath = labeledPath + '.json';
-      if (fs.existsSync(rawMetaPath)) {
-        fs.copyFileSync(rawMetaPath, labeledMetaPath);
-      }
-    } else {
-      console.error(`[move-to-labeled] 错误: 源文件不存在 - ${rawPath}`);
-      return res.status(404).json({ error: '源文件不存在' });
-    }
-    
-    // 更新元数据
-    const metadataPath = labeledPath + '.json';
-    const updatedMetadata = {
-      ...metadata,
-      filename: fileId,
-      hasLabels: true,
-      movedAt: new Date().toISOString()
-    };
-    fs.writeFileSync(metadataPath, JSON.stringify(updatedMetadata, null, 2));
-    
-    // 确认最终文件大小
-    const finalFileStats = fs.statSync(labeledPath);
-    console.log(`[move-to-labeled] 完成! labeled_files中的文件大小: ${finalFileStats.size} bytes`);
-    
-    res.json({
-      success: true,
-      message: '文件已移动到已打标目录',
-      filename: fileId,
-      size: finalFileStats.size
-    });
-    
-  } catch (error) {
-    console.error('[move-to-labeled] 移动文件失败:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// 删除文件
-app.delete('/api/files/:fileId', (req, res) => {
-  try {
-    const { fileId } = req.params;
-    
-    // 尝试在三个目录中删除
-    let deleted = false;
-    
-    for (const dir of [RAW_FILES_DIR, LABELED_FILES_DIR, FILTERED_FILES_DIR]) {
-      const filePath = path.join(dir, fileId);
-      const metadataPath = filePath + '.json';
-      
-      if (fs.existsSync(filePath)) {
-        fs.unlinkSync(filePath);
-        deleted = true;
-      }
-      
-      if (fs.existsSync(metadataPath)) {
-        fs.unlinkSync(metadataPath);
-      }
-    }
-    
-    if (!deleted) {
-      return res.status(404).json({ error: '文件不存在' });
-    }
-    
-    res.json({
-      success: true,
-      message: '文件删除成功'
-    });
-    
-  } catch (error) {
-    console.error('删除文件失败:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// 取消上传
-app.post('/api/cancel-upload', (req, res) => {
+app.post('/api/models/cancel-upload', (req, res) => {
   try {
     const { fileId } = req.body;
     const chunkDir = path.join(TEMP_CHUNKS_DIR, fileId);
-    
-    if (fs.existsSync(chunkDir)) {
-      fs.rmSync(chunkDir, { recursive: true, force: true });
-    }
-    
-    res.json({ success: true, message: '上传已取消' });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+    if (fs.existsSync(chunkDir)) fs.rmSync(chunkDir, { recursive: true, force: true });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
-// 提示词库配置文件路径
-const PROMPTS_LIBRARY_PATH = path.join(__dirname, '../prompts-library.json');
-
-// 获取提示词库
-app.get('/api/prompts-library', (req, res) => {
+// ────────────────────────────────────────────────────────────
+// GET /api/models/:id/download  — 下载网格文件
+// ?mesh=original|segmented  (默认 original)
+// ────────────────────────────────────────────────────────────
+app.get('/api/models/:id/download', (req, res) => {
   try {
-    if (!fs.existsSync(PROMPTS_LIBRARY_PATH)) {
-      return res.status(404).json({ error: '提示词库配置文件不存在' });
+    const { id } = req.params;
+    const { mesh = 'original' } = req.query;
+
+    let filePath;
+    if (mesh === 'segmented') {
+      filePath = path.join(MODELS_DIR, id, 'segments', 'mesh.ply');
+    } else {
+      filePath = findOriginalFile(id);
     }
-    
-    const data = fs.readFileSync(PROMPTS_LIBRARY_PATH, 'utf8');
-    const promptsLibrary = JSON.parse(data);
-    
+
+    if (!filePath || !fs.existsSync(filePath)) {
+      return res.status(404).json({ error: '文件不存在' });
+    }
+
+    const stats   = fs.statSync(filePath);
+    const fileSize = stats.size;
+    const range   = req.headers.range;
+
+    if (range) {
+      const parts = range.replace(/bytes=/, '').split('-');
+      const start = parseInt(parts[0], 10);
+      const end   = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+      res.writeHead(206, {
+        'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+        'Accept-Ranges': 'bytes',
+        'Content-Length': end - start + 1,
+        'Content-Type': 'application/octet-stream'
+      });
+      fs.createReadStream(filePath, { start, end }).pipe(res);
+    } else {
+      res.writeHead(200, {
+        'Content-Length': fileSize,
+        'Content-Type': 'application/octet-stream',
+        'Content-Disposition': `attachment; filename="${path.basename(filePath)}"`
+      });
+      fs.createReadStream(filePath).pipe(res);
+    }
+  } catch (err) {
+    console.error('下载文件失败:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ────────────────────────────────────────────────────────────
+// DELETE /api/models/:id
+// ────────────────────────────────────────────────────────────
+app.delete('/api/models/:id', (req, res) => {
+  try {
+    const modelDir = path.join(MODELS_DIR, req.params.id);
+    if (!fs.existsSync(modelDir)) return res.status(404).json({ error: '模型不存在' });
+    fs.rmSync(modelDir, { recursive: true, force: true });
+    res.json({ success: true, message: '模型已删除' });
+  } catch (err) {
+    console.error('删除模型失败:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ────────────────────────────────────────────────────────────
+// POST /api/models/:id/segment  — 触发 PartField 分割
+// body: { numClusters, method }
+// ────────────────────────────────────────────────────────────
+app.post('/api/models/:id/segment', (req, res) => {
+  try {
+    const { id } = req.params;
+    const { numClusters = 10, method = 'agglomerative' } = req.body;
+
+    const meta = readMeta(id);
+    if (!meta) return res.status(404).json({ error: '模型不存在' });
+
+    if (meta.status === 'segmenting') {
+      return res.status(409).json({ error: '分割正在进行中' });
+    }
+
+    // 更新状态为 segmenting
+    writeMeta(id, { ...meta, status: 'segmenting' });
+
+    const scriptPath = path.join(PROJECT_ROOT, 'scripts', 'segment_mesh.py');
+    const pythonCmd  = process.env.PYTHON_CMD || 'python';
+
+    const child = spawn(pythonCmd, [
+      scriptPath,
+      '--model_id', id,
+      '--num_clusters', String(numClusters),
+      '--method', method,
+      '--models_dir', MODELS_DIR
+    ], { cwd: PROJECT_ROOT });
+
+    child.stdout.on('data', d => process.stdout.write(`[PartField:${id}] ${d}`));
+    child.stderr.on('data', d => process.stderr.write(`[PartField:${id}] ${d}`));
+
+    child.on('close', code => {
+      const current = readMeta(id) || meta;
+      if (code === 0) {
+        writeMeta(id, { ...current, status: 'segmented' });
+        console.log(`✅ 分割完成: ${id}`);
+      } else {
+        writeMeta(id, { ...current, status: 'segment_failed' });
+        console.error(`❌ 分割失败: ${id}, exit code ${code}`);
+      }
+    });
+
+    res.json({ success: true, message: '分割任务已启动', modelId: id, numClusters, method });
+  } catch (err) {
+    console.error('启动分割失败:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ────────────────────────────────────────────────────────────
+// GET /api/models/:id/segment  — 查询分割状态 + 配置
+// ────────────────────────────────────────────────────────────
+app.get('/api/models/:id/segment', (req, res) => {
+  try {
+    const { id } = req.params;
+    const meta = readMeta(id);
+    if (!meta) return res.status(404).json({ error: '模型不存在' });
+
+    const segDir = path.join(MODELS_DIR, id, 'segments');
+    let config = null;
+    const configPath = path.join(segDir, 'config.json');
+    if (fs.existsSync(configPath)) {
+      try { config = JSON.parse(fs.readFileSync(configPath, 'utf8')); } catch {}
+    }
+
     res.json({
       success: true,
-      data: promptsLibrary
+      status: meta.status,
+      hasSegments: fs.existsSync(path.join(segDir, 'face_labels.json')),
+      config
     });
-  } catch (error) {
-    console.error('读取提示词库失败:', error);
-    res.status(500).json({ error: error.message });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
-// 保存提示词库
+// ────────────────────────────────────────────────────────────
+// GET /api/models/:id/segment/face-labels  — 返回面标签 JSON
+// ────────────────────────────────────────────────────────────
+app.get('/api/models/:id/segment/face-labels', (req, res) => {
+  try {
+    const labelsPath = path.join(MODELS_DIR, req.params.id, 'segments', 'face_labels.json');
+    if (!fs.existsSync(labelsPath)) return res.status(404).json({ error: '面标签不存在' });
+    const data = JSON.parse(fs.readFileSync(labelsPath, 'utf8'));
+    res.json({ success: true, faceLabels: data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ────────────────────────────────────────────────────────────
+// GET /api/models/:id/segment/mesh  — 返回预处理后的 PLY
+// ────────────────────────────────────────────────────────────
+app.get('/api/models/:id/segment/mesh', (req, res) => {
+  try {
+    const meshPath = path.join(MODELS_DIR, req.params.id, 'segments', 'mesh.ply');
+    if (!fs.existsSync(meshPath)) return res.status(404).json({ error: '分割网格不存在' });
+
+    const stats = fs.statSync(meshPath);
+    const range = req.headers.range;
+    if (range) {
+      const parts = range.replace(/bytes=/, '').split('-');
+      const start = parseInt(parts[0], 10);
+      const end   = parts[1] ? parseInt(parts[1], 10) : stats.size - 1;
+      res.writeHead(206, {
+        'Content-Range': `bytes ${start}-${end}/${stats.size}`,
+        'Accept-Ranges': 'bytes',
+        'Content-Length': end - start + 1,
+        'Content-Type': 'application/octet-stream'
+      });
+      fs.createReadStream(meshPath, { start, end }).pipe(res);
+    } else {
+      res.writeHead(200, {
+        'Content-Length': stats.size,
+        'Content-Type': 'application/octet-stream',
+        'Content-Disposition': 'attachment; filename="mesh.ply"'
+      });
+      fs.createReadStream(meshPath).pipe(res);
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ────────────────────────────────────────────────────────────
+// POST /api/models/:id/labels  — 保存标签（info.json + 截图）
+// ────────────────────────────────────────────────────────────
+app.post('/api/models/:id/labels', uploadChunk.any(), (req, res) => {
+  try {
+    const { id } = req.params;
+    const { infoJson } = req.body;
+
+    if (!infoJson) return res.status(400).json({ error: 'infoJson参数缺失' });
+
+    let infoData;
+    try { infoData = JSON.parse(infoJson); }
+    catch (e) { return res.status(400).json({ error: 'infoJson格式错误: ' + e.message }); }
+
+    const labDir        = path.join(MODELS_DIR, id, 'labels');
+    const imagesDir     = path.join(labDir, 'images');
+    const overviewDir   = path.join(imagesDir, 'overview');
+    const segmentsImgDir = path.join(imagesDir, 'segments');
+
+    [labDir, imagesDir, overviewDir, segmentsImgDir].forEach(d => {
+      if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
+    });
+
+    // 保存截图文件
+    if (req.files && req.files.length > 0) {
+      for (const file of req.files) {
+        // fieldname: image_overview_main  |  image_segments_0_main
+        if (!file.fieldname.startsWith('image_')) continue;
+        const parts = file.fieldname.split('_');
+        parts.shift(); // remove 'image'
+
+        if (parts[0] === 'overview') {
+          const viewKey = parts.slice(1).join('_');
+          fs.writeFileSync(path.join(overviewDir, `${viewKey}.png`), file.buffer);
+        } else if (parts[0] === 'segments') {
+          const segId  = parts[1];
+          const viewKey = parts.slice(2).join('_');
+          const segDir2 = path.join(segmentsImgDir, segId);
+          if (!fs.existsSync(segDir2)) fs.mkdirSync(segDir2, { recursive: true });
+          fs.writeFileSync(path.join(segDir2, `${viewKey}.png`), file.buffer);
+        }
+      }
+    }
+
+    // 写入 info.json（自动加上 labeledAt / updatedAt）
+    const now = new Date().toISOString();
+    const finalInfo = {
+      ...infoData,
+      labeledAt: infoData.labeledAt || now,
+      updatedAt: now
+    };
+    fs.writeFileSync(path.join(labDir, 'info.json'), JSON.stringify(finalInfo, null, 2));
+
+    // 更新 meta.json 状态
+    const meta = readMeta(id);
+    if (meta && meta.status !== 'filtered') {
+      writeMeta(id, { ...meta, status: 'labeled' });
+    }
+
+    res.json({ success: true, message: '标签已保存', modelId: id });
+  } catch (err) {
+    console.error('[labels POST] 保存失败:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ────────────────────────────────────────────────────────────
+// GET /api/models/:id/labels  — 读取标签
+// ────────────────────────────────────────────────────────────
+app.get('/api/models/:id/labels', (req, res) => {
+  try {
+    const infoPath = path.join(MODELS_DIR, req.params.id, 'labels', 'info.json');
+    if (!fs.existsSync(infoPath)) return res.status(404).json({ error: '标签不存在' });
+    const data = JSON.parse(fs.readFileSync(infoPath, 'utf8'));
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ────────────────────────────────────────────────────────────
+// POST /api/models/:id/filter  — 标记为已过滤
+// body: { filterMetrics }
+// ────────────────────────────────────────────────────────────
+app.post('/api/models/:id/filter', (req, res) => {
+  try {
+    const { id } = req.params;
+    const { filterMetrics } = req.body;
+
+    const meta = readMeta(id);
+    if (!meta) return res.status(404).json({ error: '模型不存在' });
+
+    writeMeta(id, {
+      ...meta,
+      status: 'filtered',
+      filteredAt: new Date().toISOString(),
+      filterMetrics: filterMetrics || meta.filterMetrics || null
+    });
+
+    res.json({ success: true, message: '已标记为已过滤', modelId: id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ────────────────────────────────────────────────────────────
+// PATCH /api/models/:id/meta  — 更新元数据（filterMetrics 等）
+// ────────────────────────────────────────────────────────────
+app.patch('/api/models/:id/meta', (req, res) => {
+  try {
+    const { id } = req.params;
+    const updates = req.body;
+
+    const meta = readMeta(id);
+    if (!meta) return res.status(404).json({ error: '模型不存在' });
+
+    writeMeta(id, { ...meta, ...updates });
+
+    res.json({ success: true, message: '元数据已更新', modelId: id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ────────────────────────────────────────────────────────────
+// 提示词库
+// ────────────────────────────────────────────────────────────
+const PROMPTS_LIBRARY_PATH = path.join(__dirname, '../prompts-library.json');
+
+app.get('/api/prompts-library', (req, res) => {
+  try {
+    if (!fs.existsSync(PROMPTS_LIBRARY_PATH)) return res.status(404).json({ error: '提示词库配置文件不存在' });
+    const data = JSON.parse(fs.readFileSync(PROMPTS_LIBRARY_PATH, 'utf8'));
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error('读取提示词库失败:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/api/prompts-library', (req, res) => {
   try {
     const { prompts, selectionRule, description, ignoreKeywords } = req.body;
-    
-    if (!Array.isArray(prompts)) {
-      return res.status(400).json({ error: 'prompts必须是数组' });
-    }
-    
-    const promptsLibrary = {
-      version: "1.0.0",
+    if (!Array.isArray(prompts)) return res.status(400).json({ error: 'prompts必须是数组' });
+
+    const library = {
+      version: '1.0.0',
       lastUpdated: new Date().toISOString(),
-      description: description || "VLM提示词库配置文件 - 用于工业设计3D模型分析",
-      selectionRule: selectionRule || "random",
+      description: description || 'VLM提示词库配置文件',
+      selectionRule: selectionRule || 'random',
       ignoreKeywords: Array.isArray(ignoreKeywords) ? ignoreKeywords : ['Unknown Object'],
-      prompts: prompts.map(prompt => ({
-        ...prompt,
-        updatedAt: new Date().toISOString()
-      }))
+      prompts: prompts.map(p => ({ ...p, updatedAt: new Date().toISOString() }))
     };
-    
-    // 写入文件（格式化JSON，便于阅读和版本控制）
-    fs.writeFileSync(
-      PROMPTS_LIBRARY_PATH, 
-      JSON.stringify(promptsLibrary, null, 2),
-      'utf8'
-    );
-    
-    const keywordCount = promptsLibrary.ignoreKeywords.length;
-    console.log(`✅ 提示词库已保存: ${prompts.length} 个提示词, ${keywordCount} 个过滤关键词`);
-    
-    res.json({
-      success: true,
-      message: '提示词库保存成功',
-      count: prompts.length,
-      keywordCount: keywordCount,
-      lastUpdated: promptsLibrary.lastUpdated
-    });
-  } catch (error) {
-    console.error('保存提示词库失败:', error);
-    res.status(500).json({ error: error.message });
+
+    fs.writeFileSync(PROMPTS_LIBRARY_PATH, JSON.stringify(library, null, 2), 'utf8');
+    res.json({ success: true, message: '提示词库保存成功', count: prompts.length });
+  } catch (err) {
+    console.error('保存提示词库失败:', err);
+    res.status(500).json({ error: err.message });
   }
 });
 
-// VLM API 代理 - 解决CORS问题
+// ────────────────────────────────────────────────────────────
+// VLM 代理
+// ────────────────────────────────────────────────────────────
 app.post('/api/vlm-proxy', async (req, res) => {
   try {
     const { baseUrl, apiKey, requestBody, headers: customHeaders = {} } = req.body;
-    
-    if (!baseUrl) {
-      return res.status(400).json({ error: 'baseUrl参数缺失' });
-    }
-    
-    // 准备请求头
-    const proxyHeaders = {
-      'Content-Type': 'application/json',
-      ...customHeaders
-    };
-    
-    if (apiKey) {
-      proxyHeaders['Authorization'] = `Bearer ${apiKey}`;
-    }
-    
-    console.log(`[VLM Proxy] 转发请求到: ${baseUrl}/v1/chat/completions`);
-    
-    // 使用axios转发请求
+    if (!baseUrl) return res.status(400).json({ error: 'baseUrl参数缺失' });
+
+    const proxyHeaders = { 'Content-Type': 'application/json', ...customHeaders };
+    if (apiKey) proxyHeaders['Authorization'] = `Bearer ${apiKey}`;
+
     const axios = require('axios');
-    const response = await axios.post(
-      `${baseUrl}/v1/chat/completions`,
-      requestBody,
-      {
-        headers: proxyHeaders,
-        timeout: 300000, // 5分钟超时
-        validateStatus: () => true // 接受所有状态码
-      }
-    );
-    
-    // 返回响应
+    const response = await axios.post(`${baseUrl}/v1/chat/completions`, requestBody, {
+      headers: proxyHeaders,
+      timeout: 300000,
+      validateStatus: () => true
+    });
     res.status(response.status).json(response.data);
-    
-  } catch (error) {
-    console.error('[VLM Proxy] 代理请求失败:', error.message);
-    
-    if (error.response) {
-      // API返回了错误响应
-      res.status(error.response.status).json(error.response.data);
-    } else if (error.request) {
-      // 请求发送但没有响应
-      res.status(503).json({ 
-        error: '无法连接到VLM API服务',
-        message: error.message 
-      });
-    } else {
-      // 其他错误
-      res.status(500).json({ 
-        error: '代理请求失败',
-        message: error.message 
-      });
-    }
+  } catch (err) {
+    console.error('[VLM Proxy] 代理请求失败:', err.message);
+    res.status(500).json({ error: err.message });
   }
 });
 
-// 更新元数据（支持文件夹格式）
-app.post('/api/update-metadata', (req, res) => {
-  try {
-    const { fileId, metadata, fileType = 'labeled' } = req.body;
-    
-    if (!fileId || !metadata) {
-      return res.status(400).json({ error: '缺少必要参数' });
-    }
-    
-    // 确定目标目录
-    let targetDir;
-    if (fileType === 'raw') {
-      targetDir = RAW_FILES_DIR;
-    } else if (fileType === 'labeled') {
-      targetDir = LABELED_FILES_DIR;
-    } else if (fileType === 'filtered') {
-      targetDir = FILTERED_FILES_DIR;
-    } else {
-      return res.status(400).json({ error: '无效的fileType' });
-    }
-    
-    console.log(`[update-metadata] 更新元数据: ${fileId} (${fileType})`);
-    
-    // 检查是否是文件夹格式
-    const folderName = fileId.replace(/\.(glb|gltf)$/i, '');
-    const folderPath = path.join(targetDir, folderName);
-    const infoJsonPath = path.join(folderPath, 'info.json');
-    
-    if (fs.existsSync(folderPath) && fs.statSync(folderPath).isDirectory()) {
-      // 文件夹格式：更新info.json中的filterMetrics
-      console.log(`[update-metadata] 检测到文件夹格式: ${folderName}`);
-      
-      if (fs.existsSync(infoJsonPath)) {
-        // 读取现有的info.json
-        const infoData = JSON.parse(fs.readFileSync(infoJsonPath, 'utf8'));
-        
-        // 更新filterMetrics
-        if (metadata.filterMetrics) {
-          infoData.filterMetrics = metadata.filterMetrics;
-        }
-        
-        // 更新其他元数据
-        if (!infoData.metadata) {
-          infoData.metadata = {};
-        }
-        infoData.metadata.updatedAt = new Date().toISOString();
-        if (metadata.filteredAt) {
-          infoData.metadata.filteredAt = metadata.filteredAt;
-        }
-        
-        // 写回info.json
-        fs.writeFileSync(infoJsonPath, JSON.stringify(infoData, null, 2));
-        console.log(`[update-metadata] 已更新文件夹中的info.json`);
-      } else {
-        console.warn(`[update-metadata] info.json不存在: ${infoJsonPath}`);
-      }
-    } else {
-      // 旧格式：更新.json文件
-      const metadataPath = path.join(targetDir, `${fileId}.json`);
-      fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2));
-      console.log(`[update-metadata] 已更新.json元数据文件`);
-    }
-    
-    res.json({
-      success: true,
-      message: '元数据已更新',
-      fileId
-    });
-    
-  } catch (error) {
-    console.error('[update-metadata] 更新元数据失败:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// 复制文件到filtered_files（支持文件夹格式）
-app.post('/api/copy-to-filtered', (req, res) => {
-  try {
-    const { fileId, sourceType = 'labeled' } = req.body;
-    
-    if (!fileId) {
-      return res.status(400).json({ error: 'fileId参数缺失' });
-    }
-    
-    // 确定源目录
-    let sourceDir;
-    if (sourceType === 'raw') {
-      sourceDir = RAW_FILES_DIR;
-    } else if (sourceType === 'labeled') {
-      sourceDir = LABELED_FILES_DIR;
-    } else {
-      return res.status(400).json({ error: '无效的sourceType' });
-    }
-    
-    console.log(`[copy-to-filtered] 复制: ${fileId} (${sourceType} -> filtered)`);
-    
-    // 递归复制目录的辅助函数
-    const copyDirectoryRecursive = (src, dest) => {
-      if (!fs.existsSync(dest)) {
-        fs.mkdirSync(dest, { recursive: true });
-      }
-      
-      const items = fs.readdirSync(src);
-      for (const item of items) {
-        const srcPath = path.join(src, item);
-        const destPath = path.join(dest, item);
-        
-        const stats = fs.statSync(srcPath);
-        if (stats.isDirectory()) {
-          copyDirectoryRecursive(srcPath, destPath);
-        } else {
-          fs.copyFileSync(srcPath, destPath);
-        }
-      }
-    };
-    
-    // 检查是否是文件夹格式
-    const folderName = fileId.replace(/\.(glb|gltf)$/i, '');
-    const sourceFolderPath = path.join(sourceDir, folderName);
-    
-    let totalSize = 0;
-    
-    if (fs.existsSync(sourceFolderPath) && fs.statSync(sourceFolderPath).isDirectory()) {
-      // 文件夹格式：递归复制整个文件夹
-      console.log(`[copy-to-filtered] 检测到文件夹格式: ${folderName}`);
-      
-      const targetFolderPath = path.join(FILTERED_FILES_DIR, folderName);
-      copyDirectoryRecursive(sourceFolderPath, targetFolderPath);
-      
-      // 更新info.json中的filteredAt
-      const infoJsonPath = path.join(targetFolderPath, 'info.json');
-      if (fs.existsSync(infoJsonPath)) {
-        const infoData = JSON.parse(fs.readFileSync(infoJsonPath, 'utf8'));
-        if (!infoData.metadata) {
-          infoData.metadata = {};
-        }
-        infoData.metadata.filteredAt = new Date().toISOString();
-        infoData.metadata.sourceType = sourceType;
-        fs.writeFileSync(infoJsonPath, JSON.stringify(infoData, null, 2));
-      }
-      
-      // 计算文件夹总大小
-      const calculateFolderSize = (dirPath) => {
-        let size = 0;
-        const items = fs.readdirSync(dirPath);
-        for (const item of items) {
-          const itemPath = path.join(dirPath, item);
-          const stats = fs.statSync(itemPath);
-          if (stats.isDirectory()) {
-            size += calculateFolderSize(itemPath);
-          } else {
-            size += stats.size;
-          }
-        }
-        return size;
-      };
-      
-      totalSize = calculateFolderSize(targetFolderPath);
-      console.log(`[copy-to-filtered] 文件夹已复制，总大小: ${totalSize} bytes`);
-      
-    } else {
-      // 旧格式：复制单个文件
-      const sourcePath = path.join(sourceDir, fileId);
-      const sourceMetaPath = sourcePath + '.json';
-      const targetPath = path.join(FILTERED_FILES_DIR, fileId);
-      const targetMetaPath = targetPath + '.json';
-      
-      if (!fs.existsSync(sourcePath)) {
-        return res.status(404).json({ error: '源文件不存在' });
-      }
-      
-      fs.copyFileSync(sourcePath, targetPath);
-      console.log(`[copy-to-filtered] 文件已复制: ${sourcePath} -> ${targetPath}`);
-      
-      // 复制元数据
-      if (fs.existsSync(sourceMetaPath)) {
-        const metadata = JSON.parse(fs.readFileSync(sourceMetaPath, 'utf8'));
-        metadata.filteredAt = new Date().toISOString();
-        metadata.sourceType = sourceType;
-        fs.writeFileSync(targetMetaPath, JSON.stringify(metadata, null, 2));
-        console.log(`[copy-to-filtered] 元数据已复制并更新`);
-      }
-      
-      totalSize = fs.statSync(targetPath).size;
-    }
-    
-    res.json({
-      success: true,
-      message: '文件已复制到filtered_files',
-      fileId,
-      size: totalSize
-    });
-    
-  } catch (error) {
-    console.error('[copy-to-filtered] 复制失败:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// 保存标签数据到文件夹结构（新格式）
-app.post('/api/save-labeled-folder', uploadChunk.any(), async (req, res) => {
-  try {
-    const { modelName, infoJson } = req.body;
-    
-    if (!modelName) {
-      return res.status(400).json({ error: 'modelName参数缺失' });
-    }
-    
-    if (!infoJson) {
-      return res.status(400).json({ error: 'infoJson参数缺失' });
-    }
-    
-    // 解析 info.json 数据
-    let infoData;
-    try {
-      infoData = JSON.parse(infoJson);
-    } catch (err) {
-      return res.status(400).json({ error: 'infoJson格式错误: ' + err.message });
-    }
-    
-    // 从文件名中移除扩展名（如果有）
-    const folderName = modelName.replace(/\.(glb|gltf)$/i, '');
-    const modelFolderPath = path.join(LABELED_FILES_DIR, folderName);
-    
-    console.log(`[save-labeled-folder] 开始保存文件夹: ${folderName}`);
-    console.log(`[save-labeled-folder] 目标路径: ${modelFolderPath}`);
-    console.log(`[save-labeled-folder] 接收到的文件数量: ${req.files?.length || 0}`);
-    
-    // 创建文件夹结构
-    const imagesFolderPath = path.join(modelFolderPath, 'images');
-    const overallImagesPath = path.join(imagesFolderPath, 'overall');
-    const materialsImagesPath = path.join(imagesFolderPath, 'materials');
-    
-    [modelFolderPath, imagesFolderPath, overallImagesPath, materialsImagesPath].forEach(dir => {
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-      }
-    });
-    
-    // 保存文件
-    if (req.files && req.files.length > 0) {
-      for (const file of req.files) {
-        if (file.fieldname === 'glbFile') {
-          // 保存 GLB 文件
-          const glbFilePath = path.join(modelFolderPath, `${folderName}.glb`);
-          fs.writeFileSync(glbFilePath, file.buffer);
-          console.log(`[save-labeled-folder] GLB文件已保存: ${glbFilePath}, 大小: ${file.size} bytes`);
-        } else if (file.fieldname.startsWith('image_')) {
-          // 保存图片文件
-          // fieldname 格式: image_overall_main 或 image_materials_materialName_main
-          const parts = file.fieldname.split('_');
-          parts.shift(); // 移除 'image' 前缀
-          
-          if (parts[0] === 'overall') {
-            // 整体视角图: image_overall_viewKey -> images/overall/viewKey.png
-            const viewKey = parts.slice(1).join('_');
-            const imagePath = path.join(overallImagesPath, `${viewKey}.png`);
-            fs.writeFileSync(imagePath, file.buffer);
-            console.log(`[save-labeled-folder] 整体视角图已保存: ${imagePath}`);
-          } else if (parts[0] === 'materials') {
-            // 材质视角图: image_materials_materialName_viewKey -> images/materials/materialName/viewKey.png
-            const materialName = parts[1];
-            const viewKey = parts.slice(2).join('_');
-            const materialFolder = path.join(materialsImagesPath, materialName);
-            if (!fs.existsSync(materialFolder)) {
-              fs.mkdirSync(materialFolder, { recursive: true });
-            }
-            const imagePath = path.join(materialFolder, `${viewKey}.png`);
-            fs.writeFileSync(imagePath, file.buffer);
-            console.log(`[save-labeled-folder] 材质视角图已保存: ${imagePath}`);
-          }
-        }
-      }
-    }
-    
-    // 保存 info.json
-    const infoJsonPath = path.join(modelFolderPath, 'info.json');
-    fs.writeFileSync(infoJsonPath, JSON.stringify(infoData, null, 2));
-    console.log(`[save-labeled-folder] info.json已保存: ${infoJsonPath}`);
-    
-    // 获取文件夹大小
-    const getFolderSize = (dirPath) => {
-      let totalSize = 0;
-      const files = fs.readdirSync(dirPath);
-      for (const file of files) {
-        const filePath = path.join(dirPath, file);
-        const stats = fs.statSync(filePath);
-        if (stats.isDirectory()) {
-          totalSize += getFolderSize(filePath);
-        } else {
-          totalSize += stats.size;
-        }
-      }
-      return totalSize;
-    };
-    
-    const folderSize = getFolderSize(modelFolderPath);
-    
-    res.json({
-      success: true,
-      folderPath: modelFolderPath,
-      folderName: folderName,
-      size: folderSize,
-      message: '标签数据已保存'
-    });
-    
-  } catch (error) {
-    console.error('[save-labeled-folder] 保存失败:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// 更新文件夹中的info.json（用于编辑标签）
-app.post('/api/update-info-json', (req, res) => {
-  try {
-    const { folderName, infoData } = req.body;
-    
-    if (!folderName) {
-      return res.status(400).json({ error: 'folderName参数缺失' });
-    }
-    
-    if (!infoData) {
-      return res.status(400).json({ error: 'infoData参数缺失' });
-    }
-    
-    const folderPath = path.join(LABELED_FILES_DIR, folderName);
-    const infoJsonPath = path.join(folderPath, 'info.json');
-    
-    console.log(`[update-info-json] 更新文件夹: ${folderName}`);
-    
-    // 检查文件夹是否存在
-    if (!fs.existsSync(folderPath)) {
-      return res.status(404).json({ error: '文件夹不存在' });
-    }
-    
-    // 检查info.json是否存在
-    if (!fs.existsSync(infoJsonPath)) {
-      return res.status(404).json({ error: 'info.json不存在' });
-    }
-    
-    // 更新info.json
-    const updatedInfo = {
-      ...infoData,
-      metadata: {
-        ...infoData.metadata,
-        updatedAt: new Date().toISOString()
-      }
-    };
-    
-    fs.writeFileSync(infoJsonPath, JSON.stringify(updatedInfo, null, 2));
-    console.log(`[update-info-json] info.json已更新: ${infoJsonPath}`);
-    
-    res.json({
-      success: true,
-      message: 'info.json已更新',
-      folderName
-    });
-    
-  } catch (error) {
-    console.error('[update-info-json] 更新失败:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// 读取文件夹中的info.json
-app.get('/api/get-info-json/:folderName', (req, res) => {
-  try {
-    const { folderName } = req.params;
-    
-    const folderPath = path.join(LABELED_FILES_DIR, folderName);
-    const infoJsonPath = path.join(folderPath, 'info.json');
-    
-    console.log(`[get-info-json] 读取文件夹: ${folderName}`);
-    
-    // 检查文件夹是否存在
-    if (!fs.existsSync(folderPath)) {
-      return res.status(404).json({ error: '文件夹不存在' });
-    }
-    
-    // 检查info.json是否存在
-    if (!fs.existsSync(infoJsonPath)) {
-      return res.status(404).json({ error: 'info.json不存在' });
-    }
-    
-    // 读取info.json
-    const infoContent = fs.readFileSync(infoJsonPath, 'utf8');
-    const infoData = JSON.parse(infoContent);
-    
-    console.log(`[get-info-json] 成功读取info.json`);
-    
-    res.json({
-      success: true,
-      data: infoData
-    });
-    
-  } catch (error) {
-    console.error('[get-info-json] 读取失败:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
+// ────────────────────────────────────────────────────────────
 // 健康检查
+// ────────────────────────────────────────────────────────────
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
     directories: {
-      rawFiles: fs.existsSync(RAW_FILES_DIR),
-      labeledFiles: fs.existsSync(LABELED_FILES_DIR),
-      filteredFiles: fs.existsSync(FILTERED_FILES_DIR),
+      models: fs.existsSync(MODELS_DIR),
       tempChunks: fs.existsSync(TEMP_CHUNKS_DIR)
     }
   });
 });
 
+// ────────────────────────────────────────────────────────────
+// 启动
+// ────────────────────────────────────────────────────────────
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 服务器运行在 http://0.0.0.0:${PORT}`);
-  console.log(`📁 原始文件目录: ${RAW_FILES_DIR}`);
-  console.log(`📁 已打标文件目录: ${LABELED_FILES_DIR}`);
-  console.log(`📁 过滤文件目录: ${FILTERED_FILES_DIR}`);
+  console.log(`📁 模型目录: ${MODELS_DIR}`);
   console.log(`📁 临时块目录: ${TEMP_CHUNKS_DIR}`);
-  console.log(`🔄 VLM代理已启用，解决CORS问题`);
 });
-

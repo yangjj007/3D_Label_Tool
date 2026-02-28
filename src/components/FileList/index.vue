@@ -7,7 +7,9 @@
         </div>
         <div class="header-controls">
           <el-select v-model="fileType" @change="loadFileList" size="small" style="width: 120px;">
-            <el-option label="未打标" value="raw" />
+            <el-option label="未分割" value="raw" />
+            <el-option label="分割中" value="segmenting" />
+            <el-option label="已分割" value="segmented" />
             <el-option label="已打标" value="labeled" />
             <el-option label="已过滤" value="filtered" />
             <el-option label="全部" value="all" />
@@ -32,9 +34,17 @@
           </el-button>
           <el-button 
             size="small"
+            type="info"
+            @click="$emit('batch-segment', { fileType })"
+            :disabled="fileType !== 'raw' || totalFiles === 0"
+          >
+            批量分割({{ totalFiles }})
+          </el-button>
+          <el-button 
+            size="small"
             type="warning" 
             @click="showBatchTagDialog = true"
-            :disabled="fileType !== 'raw' || totalFiles === 0"
+            :disabled="(fileType !== 'segmented' && fileType !== 'raw') || totalFiles === 0"
           >
             批量打标({{ totalFiles }})
           </el-button>
@@ -91,8 +101,8 @@
               <span class="metric-value">{{ selectedFileForMetrics.filterMetrics.meshCount || 'N/A' }}</span>
             </div>
             <div class="metric-item">
-              <span class="metric-label">材质数量:</span>
-              <span class="metric-value">{{ selectedFileForMetrics.filterMetrics.materialCount || 'N/A' }}</span>
+              <span class="metric-label">分割块数:</span>
+              <span class="metric-value">{{ selectedFileForMetrics.segmentCount || selectedFileForMetrics.filterMetrics.materialCount || 'N/A' }}</span>
             </div>
           </div>
         </div>
@@ -255,8 +265,8 @@
                 <el-tag :type="getLabelStatusType(file)" size="small">
                   {{ getLabelStatusText(file) }}
                 </el-tag>
-                <el-tag v-if="file.isFolder && file.materialCount" type="info" size="small" style="margin-left: 4px;">
-                  {{ file.materialCount }} 材质
+                <el-tag v-if="file.segmentCount" type="primary" size="small" style="margin-left: 4px;">
+                  {{ file.segmentCount }} 分块
                 </el-tag>
               </div>
               <el-progress
@@ -355,7 +365,7 @@ const props = defineProps({
   }
 });
 
-const emit = defineEmits(["select", "delete", "batch-upload", "batch-tag", "refresh"]);
+const emit = defineEmits(["select", "delete", "batch-upload", "batch-tag", "batch-segment", "refresh"]);
 
 // 分页相关状态
 const fileType = ref('raw');
@@ -525,18 +535,33 @@ const formatFileSize = size => {
   return `${value.toFixed(1)} ${units[idx]}`;
 };
 
+const STATUS_TEXT = {
+  raw:             '未分割',
+  segmenting:      '分割中',
+  segmented:       '已分割',
+  segment_failed:  '分割失败',
+  labeled:         '已打标',
+  filtered:        '已过滤'
+};
+const STATUS_TYPE = {
+  raw:             'info',
+  segmenting:      'warning',
+  segmented:       'primary',
+  segment_failed:  'danger',
+  labeled:         'success',
+  filtered:        'success'
+};
+
 const getLabelStatusText = file => {
-  if ((file.labels && file.labels.length > 0) || file.hasLabels) return "已打标";
-  if (file.status === 'processing') return "处理中";
-  if (file.status === 'error') return "失败";
-  return "未打标";
+  if (file.status && STATUS_TEXT[file.status]) return STATUS_TEXT[file.status];
+  if (file.hasLabels) return '已打标';
+  return '未分割';
 };
 
 const getLabelStatusType = file => {
-  if ((file.labels && file.labels.length > 0) || file.hasLabels) return "success";
-  if (file.status === 'processing') return "warning";
-  if (file.status === 'error') return "danger";
-  return "info";
+  if (file.status && STATUS_TYPE[file.status]) return STATUS_TYPE[file.status];
+  if (file.hasLabels) return 'success';
+  return 'info';
 };
 
 const truncateFileName = (name, frontChars = 4, backChars = 8) => {

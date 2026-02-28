@@ -1502,6 +1502,259 @@ class renderModel {
     // 更新当前编辑的模型材质列表
     this.materialModules.getModelMaterialList();
   }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // PartField 分割可视化 & 交互
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * 将 PartField 面标签应用到当前加载的模型，实现分割块着色
+   * @param {number[]} faceLabels      - 每面的整数分割 ID，长度 = 三角面数
+   * @param {Function} onSegmentClick  - 点击分割块时的回调 (segId: number) => void
+   * @returns {{ cleanup: Function, segmentCount: number, segmentColors: Map<number,string> }}
+   */
+  applyFaceSegmentation(faceLabels, onSegmentClick) {
+    // 固定调色板（最多 32 色循环）
+    const PALETTE = [
+      '#E6194B','#3CB44B','#4363D8','#F58231','#911EB4',
+      '#42D4F4','#F032E6','#BFEF45','#FABED4','#469990',
+      '#DCBEFF','#9A6324','#FFFAC8','#800000','#AAFFC3',
+      '#808000','#FFD8B1','#000075','#A9A9A9','#FFFFFF',
+      '#E6BEFF','#AA6E28','#FFFACD','#800080','#008080',
+      '#FF6347','#40E0D0','#EE82EE','#F5DEB3','#808080',
+      '#FFA500','#00FFFF'
+    ];
+
+    // 清理之前的分割状态
+    this._clearSegmentation();
+
+    // 统计所有 segment ID
+    const segIds = [...new Set(faceLabels)].sort((a, b) => a - b);
+    const segmentColors = new Map();
+    segIds.forEach((id, i) => {
+      segmentColors.set(id, PALETTE[i % PALETTE.length]);
+    });
+
+    // 用于存储原始顶点色（以便还原）
+    this._segState = {
+      faceLabels,
+      segmentColors,
+      selectedSegId: null,
+      originalColors: null,
+      onSegmentClick
+    };
+
+    // 遍历场景，找到所有 Mesh，应用顶点色
+    this.scene.traverse(obj => {
+      if (!(obj instanceof THREE.Mesh)) return;
+      const geo = obj.geometry;
+      if (!geo) return;
+
+      const posAttr = geo.getAttribute('position');
+      if (!posAttr) return;
+
+      const vertexCount = posAttr.count;
+      const colorArray  = new Float32Array(vertexCount * 3);
+
+      if (geo.index) {
+        // 索引几何体：face i = indices [3i, 3i+1, 3i+2]
+        const idx = geo.index;
+        const faceCount = Math.floor(idx.count / 3);
+        for (let f = 0; f < faceCount; f++) {
+          const segId = faceLabels[f] ?? 0;
+          const hex   = segmentColors.get(segId) ?? '#888888';
+          const color = new THREE.Color(hex);
+          for (let k = 0; k < 3; k++) {
+            const vi = idx.getX(f * 3 + k);
+            colorArray[vi * 3]     = color.r;
+            colorArray[vi * 3 + 1] = color.g;
+            colorArray[vi * 3 + 2] = color.b;
+          }
+        }
+      } else {
+        // 非索引几何体：face i = vertices [3i, 3i+1, 3i+2]
+        const faceCount = Math.floor(vertexCount / 3);
+        for (let f = 0; f < faceCount; f++) {
+          const segId = faceLabels[f] ?? 0;
+          const hex   = segmentColors.get(segId) ?? '#888888';
+          const color = new THREE.Color(hex);
+          for (let k = 0; k < 3; k++) {
+            const vi = f * 3 + k;
+            colorArray[vi * 3]     = color.r;
+            colorArray[vi * 3 + 1] = color.g;
+            colorArray[vi * 3 + 2] = color.b;
+          }
+        }
+      }
+
+      geo.setAttribute('color', new THREE.BufferAttribute(colorArray, 3));
+      geo.attributes.color.needsUpdate = true;
+
+      // 让材质使用顶点色
+      const applyVertexColor = (mat) => {
+        if (!mat) return;
+        mat._origVertexColors = mat.vertexColors;
+        mat.vertexColors = true;
+        mat.needsUpdate = true;
+      };
+      if (Array.isArray(obj.material)) {
+        obj.material.forEach(applyVertexColor);
+      } else {
+        applyVertexColor(obj.material);
+      }
+    });
+
+    // 点击事件：获取命中面 → 推断 segId
+    const clickHandler = (event) => {
+      if (!this._segState) return;
+      const rect   = this.renderer.domElement.getBoundingClientRect();
+      const mouse  = new THREE.Vector2(
+        ((event.clientX - rect.left) / rect.width)  * 2 - 1,
+        -((event.clientY - rect.top)  / rect.height) * 2 + 1
+      );
+      this.raycaster.setFromCamera(mouse, this.camera);
+      const meshes = [];
+      this.scene.traverse(obj => { if (obj instanceof THREE.Mesh) meshes.push(obj); });
+      const hits = this.raycaster.intersectObjects(meshes, false);
+      if (hits.length === 0) return;
+
+      const hit    = hits[0];
+      const faceIdx = hit.faceIndex;          // Three.js 给出的面序号
+      const segId  = faceLabels[faceIdx] ?? null;
+      if (segId === null) return;
+
+      this._segState.selectedSegId = segId;
+      this._highlightSegment(segId);
+      if (typeof this._segState.onSegmentClick === 'function') {
+        this._segState.onSegmentClick(segId);
+      }
+    };
+
+    this.renderer.domElement.addEventListener('click', clickHandler);
+    this._segClickHandler = clickHandler;
+
+    return {
+      segmentCount: segIds.length,
+      segmentColors,
+      cleanup: () => this._clearSegmentation()
+    };
+  }
+
+  /**
+   * 高亮指定分割块（其余变暗）
+   * @param {number|null} targetSegId  null 表示取消高亮
+   */
+  _highlightSegment(targetSegId) {
+    if (!this._segState) return;
+    const { faceLabels, segmentColors } = this._segState;
+
+    this.scene.traverse(obj => {
+      if (!(obj instanceof THREE.Mesh)) return;
+      const geo = obj.geometry;
+      if (!geo) return;
+      const colorAttr = geo.getAttribute('color');
+      if (!colorAttr) return;
+
+      const posAttr = geo.getAttribute('position');
+      const vertexCount = posAttr.count;
+      const colorArray  = new Float32Array(colorAttr.array);
+
+      const setFaceColor = (fi, color) => {
+        if (geo.index) {
+          const idx = geo.index;
+          for (let k = 0; k < 3; k++) {
+            const vi = idx.getX(fi * 3 + k);
+            colorArray[vi * 3]     = color.r;
+            colorArray[vi * 3 + 1] = color.g;
+            colorArray[vi * 3 + 2] = color.b;
+          }
+        } else {
+          for (let k = 0; k < 3; k++) {
+            const vi = fi * 3 + k;
+            colorArray[vi * 3]     = color.r;
+            colorArray[vi * 3 + 1] = color.g;
+            colorArray[vi * 3 + 2] = color.b;
+          }
+        }
+      };
+
+      const faceCount = geo.index
+        ? Math.floor(geo.index.count / 3)
+        : Math.floor(vertexCount / 3);
+
+      for (let f = 0; f < faceCount; f++) {
+        const segId = faceLabels[f] ?? 0;
+        let color;
+        if (targetSegId === null || segId === targetSegId) {
+          color = new THREE.Color(segmentColors.get(segId) ?? '#888888');
+        } else {
+          // 变暗：在原颜色基础上乘以 0.3
+          const base = new THREE.Color(segmentColors.get(segId) ?? '#888888');
+          color = new THREE.Color(base.r * 0.3, base.g * 0.3, base.b * 0.3);
+        }
+        setFaceColor(f, color);
+      }
+
+      colorAttr.array.set(colorArray);
+      colorAttr.needsUpdate = true;
+    });
+  }
+
+  /**
+   * 清除分割状态，还原材质
+   */
+  _clearSegmentation() {
+    if (this._segClickHandler) {
+      this.renderer?.domElement?.removeEventListener('click', this._segClickHandler);
+      this._segClickHandler = null;
+    }
+    if (!this._segState) return;
+
+    // 还原顶点色设置
+    this.scene?.traverse(obj => {
+      if (!(obj instanceof THREE.Mesh)) return;
+      const restoreMat = (mat) => {
+        if (!mat || mat._origVertexColors === undefined) return;
+        mat.vertexColors = mat._origVertexColors;
+        delete mat._origVertexColors;
+        mat.needsUpdate = true;
+      };
+      if (Array.isArray(obj.material)) {
+        obj.material.forEach(restoreMat);
+      } else {
+        restoreMat(obj.material);
+      }
+      // 移除 color 属性
+      if (obj.geometry?.getAttribute('color')) {
+        obj.geometry.deleteAttribute('color');
+      }
+    });
+
+    this._segState = null;
+  }
+
+  /**
+   * 以编程方式选择/取消选择某个分割块
+   * @param {number|null} segId
+   */
+  selectSegment(segId) {
+    if (!this._segState) return;
+    this._segState.selectedSegId = segId;
+    this._highlightSegment(segId);
+    if (segId !== null && typeof this._segState.onSegmentClick === 'function') {
+      this._segState.onSegmentClick(segId);
+    }
+  }
+
+  /** 获取当前分割状态 */
+  getSegmentationState() {
+    if (!this._segState) return null;
+    return {
+      faceLabels:    this._segState.faceLabels,
+      segmentColors: this._segState.segmentColors,
+      selectedSegId: this._segState.selectedSegId
+    };
+  }
 }
 
 Object.assign(renderModel.prototype, {

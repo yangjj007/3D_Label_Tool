@@ -4,441 +4,411 @@ import { ChunkedDownloader } from './chunkedDownload';
 import { saveModelFile, deleteModelFile, listFolderFiles } from './filePersistence';
 import { getFileType } from './utilityFunction';
 
-// 强制要求从环境变量读取后端API地址配置
 if (!import.meta.env.VITE_API_BASE_URL) {
   throw new Error(
     '❌ 错误: 未设置环境变量 VITE_API_BASE_URL\n' +
     '请在项目根目录创建 .env 文件并配置:\n' +
-    'VITE_API_BASE_URL=http://localhost:30005/api\n' +
-    '或根据实际服务器地址配置，例如:\n' +
-    'VITE_API_BASE_URL=http://10.26.2.3:30005/api'
+    'VITE_API_BASE_URL=http://localhost:30005/api'
   );
 }
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL;
 
-// 创建带超时配置的axios实例
-const axiosWithTimeout = axios.create({
-  timeout: 60000, // 普通请求60秒超时
-});
+const axiosWithTimeout = axios.create({ timeout: 60000 });
+const axiosLongTimeout = axios.create({ timeout: 300000 });
 
-// 创建用于长时间操作的axios实例（如文件下载）
-const axiosLongTimeout = axios.create({
-  timeout: 300000, // 长时间操作5分钟超时（大文件下载）
-}); 
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 模型列表
+// ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * 获取服务器文件列表（分页）
- * @param {string} type - 文件类型：raw, labeled, all
- * @param {number} page - 页码
- * @param {number} pageSize - 每页数量
- * @returns {Promise<{total, page, pageSize, files}>}
+ * 获取服务器模型列表（分页）
+ * @param {string} status - raw | segmented | labeled | filtered | all
+ * @param {number} page
+ * @param {number} pageSize
  */
-export async function getServerFileList(type = 'raw', page = 1, pageSize = 10) {
+export async function getServerFileList(status = 'all', page = 1, pageSize = 10) {
   try {
-    const response = await axiosWithTimeout.get(`${API_BASE_URL}/files`, {
-      params: { type, page, pageSize }
+    const response = await axiosWithTimeout.get(`${API_BASE_URL}/models`, {
+      params: { status, page, pageSize }
     });
     return response.data;
   } catch (error) {
-    if (error.code === 'ECONNABORTED') {
-      console.error('获取服务器文件列表超时');
-      throw new Error('获取文件列表超时，请检查网络连接或服务器状态');
-    }
+    if (error.code === 'ECONNABORTED') throw new Error('获取文件列表超时');
     console.error('获取服务器文件列表失败:', error);
     throw error;
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 单个模型信息
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
- * 上传模型文件到服务器（支持分块上传）
- * @param {Blob} fileBlob - 文件Blob对象
- * @param {Object} metadata - 文件元数据
- * @param {Function} onProgress - 进度回调函数
- * @returns {Promise}
+ * 获取单个模型的完整信息
+ * @param {string} modelId
+ */
+export async function getModelInfo(modelId) {
+  try {
+    const response = await axiosWithTimeout.get(`${API_BASE_URL}/models/${modelId}`);
+    return response.data;
+  } catch (error) {
+    console.error('获取模型信息失败:', error);
+    throw error;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 上传
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * 上传模型文件到服务器（分块上传）
+ * @param {Blob} fileBlob
+ * @param {Object} metadata
+ * @param {Function} onProgress
  */
 export async function uploadModelToServer(fileBlob, metadata, onProgress) {
   try {
-    const uploader = new ChunkedUploader(fileBlob, metadata);
-    const result = await uploader.upload(onProgress);
-    return result;
+    const uploader = new ChunkedUploader(fileBlob, metadata, {
+      uploadChunkUrl:   `${API_BASE_URL}/models/upload-chunk`,
+      checkChunksUrl:   `${API_BASE_URL}/models/check-chunks`,
+      mergeChunksUrl:   `${API_BASE_URL}/models/merge-chunks`,
+    });
+    return await uploader.upload(onProgress);
   } catch (error) {
     console.error('上传到服务器失败:', error);
     throw error;
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 下载
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
- * 从服务器下载模型文件到IndexedDB
- * @param {string} fileId - 文件ID
- * @param {Object} metadata - 文件元数据
- * @param {Function} onProgress - 进度回调函数
- * @returns {Promise}
+ * 从服务器下载模型网格到 IndexedDB
+ * @param {string} modelId
+ * @param {Object} metadata
+ * @param {Function} onProgress
+ * @param {'original'|'segmented'} meshType
  */
-export async function downloadModelFromServer(fileId, metadata, onProgress) {
+export async function downloadModelFromServer(modelId, metadata, onProgress, meshType = 'original') {
   try {
-    // 先尝试获取文件信息以获取准确的文件大小
-    // 使用更大的分页或者直接尝试下载
-    console.log(`[downloadModelFromServer] 准备下载文件: ${fileId}`);
-    
-    let fileInfo = null;
-    let fileSize = null;
-    let fileName = metadata.name || fileId;
-    
-    // 尝试通过HEAD请求获取文件大小（更高效）
+    const downloadUrl = `${API_BASE_URL}/models/${modelId}/download?mesh=${meshType}`;
+    const fileId = modelId;
+
+    let fileSize = 0;
+    let fileName = metadata.name || `${modelId}.glb`;
+
     try {
-      const headResponse = await axiosLongTimeout.head(`${API_BASE_URL}/download/${fileId}`);
+      const headResponse = await axiosLongTimeout.head(downloadUrl);
       fileSize = parseInt(headResponse.headers['content-length'] || '0');
-      console.log(`[downloadModelFromServer] 通过HEAD请求获取文件大小: ${fileSize} bytes`);
-    } catch (headError) {
-      console.warn(`[downloadModelFromServer] HEAD请求失败，尝试从文件列表获取:`, headError.message);
-      
-      // 如果HEAD失败，尝试从文件列表获取（但使用更大的分页）
-      try {
-        const fileList = await getServerFileList('all', 1, 10000); // 增加到10000
-        fileInfo = fileList.files.find(f => f.id === fileId || f.name === fileId);
-        
-        if (!fileInfo) {
-          throw new Error('文件不存在');
-        }
-        
-        fileSize = fileInfo.size;
-        fileName = fileInfo.name;
-        console.log(`[downloadModelFromServer] 从文件列表获取文件信息: ${fileName}, ${fileSize} bytes`);
-      } catch (listError) {
-        // 如果文件列表也失败，尝试直接下载（让下载API返回404）
-        console.warn(`[downloadModelFromServer] 获取文件列表失败，将尝试直接下载:`, listError.message);
-        fileSize = 0; // 将由下载器处理
-      }
+    } catch {
+      // 继续，让下载器处理
     }
-    
-    // 判断文件是否已打标（来自labeled_files目录）
-    const isFromLabeledDir = (fileInfo && fileInfo.type === 'labeled') || metadata.hasLabels;
-    console.log(`[downloadModelFromServer] 下载文件: ${fileName}, 预期大小: ${fileSize} bytes, 从labeled_files: ${isFromLabeledDir}`);
-    
-    // 创建下载器
-    const downloader = new ChunkedDownloader(
-      fileId,
-      fileName,
-      fileSize || 1 // 如果size为0，设置为1以避免除零错误
-    );
-    
-    // 下载文件
+
+    const downloader = new ChunkedDownloader(fileId, fileName, fileSize || 1, {
+      downloadUrl
+    });
+
     const fileBlob = await downloader.download(onProgress);
-    console.log(`[downloadModelFromServer] 下载完成，实际文件大小: ${fileBlob.size} bytes, 从labeled_files: ${isFromLabeledDir}`);
-    
-    // 从文件名提取真实的文件格式（不使用服务器的 type，它表示 raw/labeled 状态）
+
     const actualFileType = getFileType(fileName);
-    
-    // 保存到IndexedDB
     await saveModelFile({
       ...metadata,
       id: metadata.id || fileId,
       name: metadata.name || fileName,
-      size: fileBlob.size, // 使用实际下载的文件大小
-      type: actualFileType, // 使用从文件名提取的真实文件类型
-      hasLabels: isFromLabeledDir || metadata.hasLabels, // 保存hasLabels标记
+      size: fileBlob.size,
+      type: actualFileType,
+      hasSegments: metadata.hasSegments || false,
+      hasLabels:   metadata.hasLabels   || false,
       isTemporary: metadata.isTemporary ?? true,
-      serverFileId: metadata.serverFileId || fileId,
-      batchNumber: metadata.batchNumber || null,
+      serverFileId: modelId,
       isFromServer: true
     }, fileBlob);
-    
+
     return { success: true, fileId, size: fileBlob.size, blob: fileBlob };
   } catch (error) {
     console.error('从服务器下载失败:', error);
-    // 如果是404错误，提供更明确的错误信息
-    if (error.response && error.response.status === 404) {
-      throw new Error('文件不存在于服务器');
-    }
+    if (error.response?.status === 404) throw new Error('文件不存在于服务器');
     throw error;
   }
 }
 
 /**
- * 批量下载文件到IndexedDB
- * @param {Array<string>} fileIds - 文件ID数组
- * @param {Function} onProgress - 进度回调函数
- * @returns {Promise}
+ * 批量下载文件到 IndexedDB
  */
 export async function batchDownloadFiles(fileIds, onProgress) {
-  try {
-    const results = [];
-    let completed = 0;
-    
-    for (const fileId of fileIds) {
-      try {
-        await downloadModelFromServer(fileId, { serverFileId: fileId }, (progress) => {
-          if (onProgress) {
-            onProgress({
-              fileId,
-              progress: progress.overall,
-              completed,
-              total: fileIds.length,
-              overall: (completed + progress.overall) / fileIds.length
-            });
-          }
-        });
-        
-        results.push({ fileId, success: true });
-      } catch (error) {
-        results.push({ fileId, success: false, error: error.message });
-      }
-      
-      completed++;
+  const results = [];
+  let completed = 0;
+  for (const fileId of fileIds) {
+    try {
+      await downloadModelFromServer(fileId, { serverFileId: fileId }, (progress) => {
+        if (onProgress) {
+          onProgress({
+            fileId,
+            progress: progress.overall,
+            completed,
+            total: fileIds.length,
+            overall: (completed + progress.overall) / fileIds.length
+          });
+        }
+      });
+      results.push({ fileId, success: true });
+    } catch (error) {
+      results.push({ fileId, success: false, error: error.message });
     }
-    
-    return results;
-  } catch (error) {
-    console.error('批量下载失败:', error);
-    throw error;
+    completed++;
   }
+  return results;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 分割
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
- * 将文件移动到已打标目录
- * @param {string} fileId - 服务器文件ID
- * @param {Blob} labeledBlob - 已打标的模型文件Blob
- * @param {Object} metadata - 元数据（包含标签信息）
- * @returns {Promise}
+ * 触发 PartField 分割
+ * @param {string} modelId
+ * @param {number} numClusters
+ * @param {'agglomerative'|'kmeans'} method
  */
-export async function moveToLabeled(fileId, labeledBlob, metadata) {
+export async function triggerSegmentation(modelId, numClusters = 10, method = 'agglomerative') {
   try {
-    console.log(`[moveToLabeled] 开始上传，fileId: ${fileId}, blob大小: ${labeledBlob.size} bytes`);
-    
-    const formData = new FormData();
-    formData.append('file', labeledBlob, metadata.name || fileId);
-    formData.append('fileId', fileId);
-    formData.append('metadata', JSON.stringify({
-      ...metadata,
-      hasLabels: true,
-      updatedAt: new Date().toISOString()
-    }));
-    
-    console.log(`[moveToLabeled] FormData已构建，准备POST到 ${API_BASE_URL}/move-to-labeled`);
-    
-    const response = await axiosLongTimeout.post(`${API_BASE_URL}/move-to-labeled`, formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-      onUploadProgress: (progressEvent) => {
-        const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
-        console.log(`[moveToLabeled] 上传进度: ${percentCompleted}%`);
-      }
+    const response = await axiosLongTimeout.post(`${API_BASE_URL}/models/${modelId}/segment`, {
+      numClusters,
+      method
     });
-    
-    console.log(`[moveToLabeled] 上传成功，服务器响应:`, response.data);
     return response.data;
   } catch (error) {
-    console.error('[moveToLabeled] 移动到已打标目录失败:', error);
-    if (error.response) {
-      console.error('[moveToLabeled] 服务器响应错误:', {
-        status: error.response.status,
-        data: error.response.data
-      });
-    }
+    console.error('触发分割失败:', error);
     throw error;
   }
 }
 
 /**
- * 保存标签文件夹结构到服务器（新格式）
- * @param {string} modelName - 模型文件名（含扩展名）
- * @param {Blob} glbBlob - 原始GLB文件
- * @param {Object} infoData - info.json数据
- * @param {Object} images - 图片数据 { overall: [{viewKey, dataURL}], materials: [{materialName, viewKey, dataURL}] }
- * @returns {Promise}
+ * 查询分割状态
+ * @param {string} modelId
  */
-export async function saveLabeledFolder(modelName, glbBlob, infoData, images) {
+export async function getSegmentStatus(modelId) {
   try {
-    console.log(`[saveLabeledFolder] 开始保存文件夹结构: ${modelName}`);
-    console.log(`[saveLabeledFolder] GLB大小: ${glbBlob.size} bytes`);
-    console.log(`[saveLabeledFolder] 整体视角图: ${images.overall?.length || 0} 张`);
-    console.log(`[saveLabeledFolder] 材质视角图: ${images.materials?.length || 0} 张`);
-    
-    // 辅助函数：DataURL转Blob
+    const response = await axiosWithTimeout.get(`${API_BASE_URL}/models/${modelId}/segment`);
+    return response.data;
+  } catch (error) {
+    console.error('查询分割状态失败:', error);
+    throw error;
+  }
+}
+
+/**
+ * 获取面标签 JSON
+ * @param {string} modelId
+ * @returns {Promise<number[]>}  face_labels 数组
+ */
+export async function getSegmentFaceLabels(modelId) {
+  try {
+    const response = await axiosWithTimeout.get(
+      `${API_BASE_URL}/models/${modelId}/segment/face-labels`
+    );
+    return response.data.faceLabels;
+  } catch (error) {
+    console.error('获取面标签失败:', error);
+    throw error;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 标签
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * 保存标签到服务器 (labels/info.json + 截图)
+ * @param {string} modelId
+ * @param {Object} infoData  - { overallLabel, segments:[{id,label,color}...] }
+ * @param {Object} images    - { overview:[{viewKey,dataURL}], segments:[{segId,viewKey,dataURL}] }
+ */
+export async function saveModelLabels(modelId, infoData, images = {}) {
+  try {
     const dataURLToBlob = (dataURL) => {
-      const arr = dataURL.split(',');
-      const mime = arr[0].match(/:(.*?);/)[1];
-      const bstr = atob(arr[1]);
-      let n = bstr.length;
-      const u8arr = new Uint8Array(n);
-      while(n--) {
-        u8arr[n] = bstr.charCodeAt(n);
-      }
-      return new Blob([u8arr], {type: mime});
+      const arr   = dataURL.split(',');
+      const mime  = arr[0].match(/:(.*?);/)[1];
+      const bstr  = atob(arr[1]);
+      const u8arr = new Uint8Array(bstr.length);
+      for (let i = 0; i < bstr.length; i++) u8arr[i] = bstr.charCodeAt(i);
+      return new Blob([u8arr], { type: mime });
     };
-    
+
     const formData = new FormData();
-    formData.append('modelName', modelName);
-    formData.append('glbFile', glbBlob, modelName);
     formData.append('infoJson', JSON.stringify(infoData));
-    
-    // 添加整体视角图
-    if (images.overall && Array.isArray(images.overall)) {
-      for (const img of images.overall) {
-        const blob = dataURLToBlob(img.dataURL);
-        const fieldName = `image_overall_${img.viewKey}`;
-        formData.append(fieldName, blob, `${img.viewKey}.png`);
-        console.log(`[saveLabeledFolder] 添加整体图: ${fieldName}`);
+
+    if (images.overview) {
+      for (const img of images.overview) {
+        formData.append(`image_overview_${img.viewKey}`, dataURLToBlob(img.dataURL), `${img.viewKey}.png`);
       }
     }
-    
-    // 添加材质视角图
-    if (images.materials && Array.isArray(images.materials)) {
-      for (const img of images.materials) {
-        const blob = dataURLToBlob(img.dataURL);
-        // 清理材质名称（移除特殊字符）
-        const cleanName = img.materialName.replace(/[^a-zA-Z0-9_-]/g, '_');
-        const fieldName = `image_materials_${cleanName}_${img.viewKey}`;
-        formData.append(fieldName, blob, `${img.viewKey}.png`);
-        console.log(`[saveLabeledFolder] 添加材质图: ${fieldName}`);
+    if (images.segments) {
+      for (const img of images.segments) {
+        formData.append(`image_segments_${img.segId}_${img.viewKey}`, dataURLToBlob(img.dataURL), `${img.viewKey}.png`);
       }
     }
-    
-    console.log(`[saveLabeledFolder] 开始上传到服务器...`);
-    
-    const response = await axiosLongTimeout.post(`${API_BASE_URL}/save-labeled-folder`, formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-      onUploadProgress: (progressEvent) => {
-        const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
-        console.log(`[saveLabeledFolder] 上传进度: ${percentCompleted}%`);
-      }
-    });
-    
-    console.log(`[saveLabeledFolder] 上传成功:`, response.data);
+
+    const response = await axiosLongTimeout.post(
+      `${API_BASE_URL}/models/${modelId}/labels`,
+      formData,
+      { headers: { 'Content-Type': 'multipart/form-data' } }
+    );
     return response.data;
   } catch (error) {
-    console.error('[saveLabeledFolder] 保存文件夹失败:', error);
-    if (error.response) {
-      console.error('[saveLabeledFolder] 服务器响应错误:', {
-        status: error.response.status,
-        data: error.response.data
-      });
-    }
+    console.error('保存标签失败:', error);
     throw error;
   }
 }
 
 /**
- * 删除服务器文件
- * @param {string} fileId - 文件ID
- * @returns {Promise}
+ * 读取标签
+ * @param {string} modelId
  */
-export async function deleteServerFile(fileId) {
+export async function getModelLabels(modelId) {
   try {
-    const response = await axiosWithTimeout.delete(`${API_BASE_URL}/files/${fileId}`);
+    const response = await axiosWithTimeout.get(`${API_BASE_URL}/models/${modelId}/labels`);
     return response.data;
   } catch (error) {
-    if (error.code === 'ECONNABORTED') {
-      throw new Error('删除文件请求超时');
-    }
-    console.error('删除服务器文件失败:', error);
+    console.error('读取标签失败:', error);
     throw error;
   }
 }
 
-/**
- * 清除指定批次的IndexedDB文件
- * @param {number} batchNumber - 批次号
- * @returns {Promise}
- */
-export async function clearBatchFiles(batchNumber) {
-  try {
-    const allFiles = await listFolderFiles();
-    const batchFiles = allFiles.filter(f => f.batchNumber === batchNumber);
-    
-    for (const file of batchFiles) {
-      await deleteModelFile(file.id);
-    }
-    
-    console.log(`批次 ${batchNumber} 的 ${batchFiles.length} 个文件已从IndexedDB清除`);
-    return { success: true, count: batchFiles.length };
-  } catch (error) {
-    console.error('清除批次文件失败:', error);
-    throw error;
-  }
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// 过滤 & 元数据
+// ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * 清除所有临时文件
- * @returns {Promise}
+ * 标记模型为已过滤
+ * @param {string} modelId
+ * @param {Object} filterMetrics
  */
-export async function clearTemporaryFiles() {
+export async function markAsFiltered(modelId, filterMetrics = null) {
   try {
-    const allFiles = await listFolderFiles();
-    const tempFiles = allFiles.filter(f => f.isTemporary === true);
-    
-    for (const file of tempFiles) {
-      await deleteModelFile(file.id);
-    }
-    
-    console.log(`${tempFiles.length} 个临时文件已从IndexedDB清除`);
-    return { success: true, count: tempFiles.length };
-  } catch (error) {
-    console.error('清除临时文件失败:', error);
-    throw error;
-  }
-}
-
-/**
- * 健康检查
- * @returns {Promise}
- */
-export async function healthCheck() {
-  try {
-    const response = await axiosWithTimeout.get(`${API_BASE_URL}/health`);
-    return response.data;
-  } catch (error) {
-    if (error.code === 'ECONNABORTED') {
-      throw new Error('健康检查超时，服务器可能未响应');
-    }
-    console.error('健康检查失败:', error);
-    throw error;
-  }
-}
-
-/**
- * 更新文件元数据
- * @param {string} fileId - 文件ID
- * @param {Object} metadata - 元数据对象
- * @param {string} fileType - 文件类型 (raw/labeled/filtered)
- * @returns {Promise}
- */
-export async function updateMetadata(fileId, metadata, fileType = 'labeled') {
-  try {
-    const response = await axiosWithTimeout.post(`${API_BASE_URL}/update-metadata`, {
-      fileId,
-      metadata,
-      fileType
+    const response = await axiosWithTimeout.post(`${API_BASE_URL}/models/${modelId}/filter`, {
+      filterMetrics
     });
     return response.data;
   } catch (error) {
-    if (error.code === 'ECONNABORTED') {
-      throw new Error('更新元数据请求超时');
-    }
+    console.error('标记过滤失败:', error);
+    throw error;
+  }
+}
+
+/**
+ * 更新模型元数据
+ * @param {string} modelId
+ * @param {Object} updates  - 要合并的字段
+ */
+export async function updateMetadata(modelId, updates) {
+  try {
+    const response = await axiosWithTimeout.patch(
+      `${API_BASE_URL}/models/${modelId}/meta`,
+      updates
+    );
+    return response.data;
+  } catch (error) {
     console.error('更新元数据失败:', error);
     throw error;
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 删除
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
- * 复制文件到filtered_files
- * @param {string} fileId - 文件ID
- * @param {string} sourceType - 源类型 (raw/labeled)
- * @returns {Promise}
+ * 删除服务器模型
+ * @param {string} modelId
  */
-export async function copyToFiltered(fileId, sourceType = 'labeled') {
+export async function deleteServerFile(modelId) {
   try {
-    const response = await axiosWithTimeout.post(`${API_BASE_URL}/copy-to-filtered`, {
-      fileId,
-      sourceType
-    });
+    const response = await axiosWithTimeout.delete(`${API_BASE_URL}/models/${modelId}`);
     return response.data;
   } catch (error) {
-    if (error.code === 'ECONNABORTED') {
-      throw new Error('复制文件请求超时');
-    }
-    console.error('复制到filtered失败:', error);
+    console.error('删除服务器模型失败:', error);
     throw error;
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// IndexedDB 工具
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function clearBatchFiles(batchNumber) {
+  const allFiles = await listFolderFiles();
+  const batchFiles = allFiles.filter(f => f.batchNumber === batchNumber);
+  for (const file of batchFiles) await deleteModelFile(file.id);
+  return { success: true, count: batchFiles.length };
+}
+
+export async function clearTemporaryFiles() {
+  const allFiles = await listFolderFiles();
+  const tempFiles = allFiles.filter(f => f.isTemporary === true);
+  for (const file of tempFiles) await deleteModelFile(file.id);
+  return { success: true, count: tempFiles.length };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 健康检查 & 提示词库
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function healthCheck() {
+  try {
+    const response = await axiosWithTimeout.get(`${API_BASE_URL}/health`);
+    return response.data;
+  } catch (error) {
+    if (error.code === 'ECONNABORTED') throw new Error('健康检查超时');
+    throw error;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 兼容旧调用名 — 以下为向后兼容的别名
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** @deprecated 使用 saveModelLabels */
+export async function saveLabeledFolder(modelName, _glbBlob, infoData, images) {
+  const modelId = modelName.replace(/\.(glb|gltf)$/i, '');
+  // 转换旧 materials 图片格式 → 新 segments 格式
+  const convertedImages = {
+    overview: images?.overall || [],
+    segments: (images?.materials || []).map(img => ({
+      segId: img.materialName?.replace(/[^a-zA-Z0-9_-]/g, '_') || '0',
+      viewKey: img.viewKey,
+      dataURL: img.dataURL
+    }))
+  };
+  // 转换旧 materials 格式 → 新 segments 格式
+  const convertedInfo = {
+    ...infoData,
+    segments: infoData.materials?.map((m, i) => ({
+      id: i,
+      label: m.label || '',
+      color: m.color || '#888888',
+      name: m.name
+    })) || infoData.segments || []
+  };
+  return saveModelLabels(modelId, convertedInfo, convertedImages);
+}
+
+/** @deprecated 使用 markAsFiltered */
+export async function copyToFiltered(fileId) {
+  return markAsFiltered(fileId.replace(/\.(glb|gltf)$/i, ''));
+}
+
+/** @deprecated 使用 updateMetadata */
+export async function updateMetadataLegacy(fileId, metadata) {
+  return updateMetadata(fileId.replace(/\.(glb|gltf)$/i, ''), metadata);
+}
+
+/** @deprecated 使用 downloadModelFromServer */
+export async function moveToLabeled(fileId, _labeledBlob, _metadata) {
+  console.warn('[moveToLabeled] 已废弃，新流程不需要此操作，数据由 saveModelLabels 保存');
+  return { success: true, message: '已忽略（新流程）' };
+}

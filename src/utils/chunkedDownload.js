@@ -21,14 +21,26 @@ const axiosDownload = axios.create({
  * 分块下载器类
  */
 export class ChunkedDownloader {
-  constructor(fileId, filename, fileSize, chunkSize = CHUNK_SIZE) {
+  /**
+   * @param {string} fileId
+   * @param {string} filename
+   * @param {number} fileSize
+   * @param {Object|number} options  - { downloadUrl, chunkSize } 或直接传数字（兼容旧调用）
+   */
+  constructor(fileId, filename, fileSize, options = {}) {
+    const isLegacy = typeof options === 'number';
+    const opts = isLegacy ? { chunkSize: options } : options;
+
     this.fileId = fileId;
     this.filename = filename;
     this.fileSize = fileSize;
-    this.chunkSize = chunkSize;
-    this.totalChunks = Math.ceil(fileSize / chunkSize);
+    this.chunkSize = opts.chunkSize || CHUNK_SIZE;
+    this.totalChunks = Math.ceil(fileSize / this.chunkSize);
     this.chunks = new Array(this.totalChunks);
     this.aborted = false;
+
+    // 自定义下载 URL（新格式）或自动构建旧格式
+    this.downloadUrl = opts.downloadUrl || `${API_BASE_URL}/models/${fileId}/download`;
   }
 
   /**
@@ -39,7 +51,7 @@ export class ChunkedDownloader {
     const end = Math.min(start + this.chunkSize - 1, this.fileSize - 1);
 
     try {
-      const response = await axiosDownload.get(`${API_BASE_URL}/download/${this.fileId}`, {
+      const response = await axiosDownload.get(this.downloadUrl, {
         headers: {
           Range: `bytes=${start}-${end}`
         },

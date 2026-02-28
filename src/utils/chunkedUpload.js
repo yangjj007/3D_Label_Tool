@@ -20,14 +20,28 @@ const axiosUpload = axios.create({
  * 分块上传器类
  */
 export class ChunkedUploader {
-  constructor(file, metadata = {}, chunkSize = CHUNK_SIZE) {
+  /**
+   * @param {File|Blob} file
+   * @param {Object} metadata
+   * @param {Object|number} options  - { uploadChunkUrl, checkChunksUrl, mergeChunksUrl, chunkSize }
+   *                                   或直接传数字（兼容旧调用 chunkSize）
+   */
+  constructor(file, metadata = {}, options = {}) {
+    const isLegacy = typeof options === 'number';
+    const opts = isLegacy ? { chunkSize: options } : options;
+
     this.file = file;
     this.metadata = metadata;
     this.fileId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-    this.chunkSize = chunkSize;
+    this.chunkSize = opts.chunkSize || CHUNK_SIZE;
     this.totalChunks = Math.ceil(file.size / this.chunkSize);
     this.uploadedChunks = new Set();
     this.aborted = false;
+
+    // API 端点（新路径）
+    this.uploadChunkUrl   = opts.uploadChunkUrl   || `${API_BASE_URL}/models/upload-chunk`;
+    this.checkChunksUrl   = opts.checkChunksUrl   || `${API_BASE_URL}/models/check-chunks`;
+    this.mergeChunksUrl   = opts.mergeChunksUrl   || `${API_BASE_URL}/models/merge-chunks`;
   }
 
   /**
@@ -35,7 +49,7 @@ export class ChunkedUploader {
    */
   async checkExistingChunks() {
     try {
-      const response = await axiosUpload.post(`${API_BASE_URL}/check-chunks`, {
+      const response = await axiosUpload.post(this.checkChunksUrl, {
         fileId: this.fileId,
         totalChunks: this.totalChunks
       });
@@ -72,7 +86,7 @@ export class ChunkedUploader {
     formData.append('totalChunks', this.totalChunks);
 
     try {
-      await axiosUpload.post(`${API_BASE_URL}/upload-chunk`, formData, {
+      await axiosUpload.post(this.uploadChunkUrl, formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
         onUploadProgress: (progressEvent) => {
           if (onProgress) {
@@ -169,7 +183,7 @@ export class ChunkedUploader {
    */
   async mergeChunks() {
     try {
-      const response = await axiosUpload.post(`${API_BASE_URL}/merge-chunks`, {
+      const response = await axiosUpload.post(this.mergeChunksUrl, {
         fileId: this.fileId,
         filename: this.metadata.name || this.file.name,
         totalChunks: this.totalChunks,

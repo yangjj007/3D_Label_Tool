@@ -19,7 +19,7 @@ class MultiImageVLM {
   _getProxyUrl() {
     // 检查是否是localhost的baseUrl，如果是则使用代理
     if (this.baseUrl && this.baseUrl.includes('localhost')) {
-      const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:30005/api';
+      const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ;
       return apiBaseUrl.replace(/\/api$/, '') + '/api/vlm-proxy';
     }
     return null;

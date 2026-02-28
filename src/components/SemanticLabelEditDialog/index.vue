@@ -1,13 +1,13 @@
 <template>
   <el-dialog
     v-model="dialogVisible"
-    title="编辑语义标签"
+    :title="formData.segId !== null ? '编辑分割块标签' : '编辑语义标签'"
     width="600px"
     :close-on-click-modal="false"
     destroy-on-close
   >
     <el-form :model="formData" label-width="100px">
-      <el-form-item label="材质名称">
+      <el-form-item :label="formData.segId !== null ? '分割块' : '材质名称'">
         <el-input v-model="formData.meshName" disabled />
       </el-form-item>
       <el-form-item label="语义标签">
@@ -39,7 +39,7 @@ import { ElMessage, ElMessageBox } from 'element-plus';
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js';
 import * as THREE from 'three';
 import { saveModelFile, getModelFile } from '@/utils/filePersistence';
-import { moveToLabeled } from '@/utils/serverApi';
+import { getModelLabels, saveModelLabels } from '@/utils/serverApi';
 
 const dialogVisible = ref(false);
 const saving = ref(false);
@@ -47,6 +47,7 @@ const saving = ref(false);
 const formData = reactive({
   meshName: '',
   label: '',
+  segId: null,   // 分割块 ID（PartField segment）
   mesh: null,
   model: null,
   fileInfo: null,
@@ -57,21 +58,35 @@ let onSaveCallback = null;
 
 /**
  * 打开编辑弹窗
+ * @param {Object|number} mesh - Three.js mesh 对象，或分割块描述对象 {segId, label, name}
+ * @param {Object} model
+ * @param {Object} fileInfo
+ * @param {string} fileId
+ * @param {Function} callback
  */
 const showDialog = (mesh, model, fileInfo, fileId, callback) => {
   if (!mesh) {
-    ElMessage.warning('未选中材质对象');
+    ElMessage.warning('未选中对象');
     return;
   }
-  
-  formData.mesh = mesh;
-  formData.model = model;
+
+  formData.mesh     = mesh;
+  formData.model    = model;
   formData.fileInfo = fileInfo;
-  formData.fileId = fileId;
-  formData.meshName = mesh.name || mesh.uuid;
-  formData.label = mesh.userData?.semanticLabel || '';
+  formData.fileId   = fileId;
+
+  // 兼容分割块模式（mesh 为 {segId, label, name} 简单对象）
+  if (typeof mesh.segId !== 'undefined') {
+    formData.segId    = mesh.segId;
+    formData.meshName = mesh.name ?? `分割块 ${mesh.segId}`;
+    formData.label    = mesh.label || '';
+  } else {
+    formData.segId    = null;
+    formData.meshName = mesh.name || mesh.uuid;
+    formData.label    = mesh.userData?.semanticLabel || '';
+  }
+
   onSaveCallback = callback;
-  
   dialogVisible.value = true;
 };
 
@@ -131,85 +146,61 @@ const handleSave = async () => {
 };
 
 /**
- * 更新文件夹格式的 info.json
+ * 更新模型标签（新 API：labels/info.json 中的 segments）
  */
 const updateInfoJson = async () => {
-  if (!formData.fileInfo) {
-    throw new Error('文件信息不存在');
+  if (!formData.fileInfo) throw new Error('文件信息不存在');
+
+  const modelId = (formData.fileInfo.id || formData.fileInfo.name || '')
+    .replace(/\.(glb|gltf)$/i, '');
+
+  console.log('[语义标签编辑] 更新 segments 标签, modelId:', modelId);
+
+  // 1. 读取现有 labels/info.json
+  let infoData = { segments: [] };
+  try {
+    const result = await getModelLabels(modelId);
+    if (result.success && result.data) infoData = result.data;
+  } catch {
+    // 首次保存时可能不存在
   }
-  
-  const fileName = formData.fileInfo.name || formData.fileInfo.fileName || '';
-  // 移除扩展名得到文件夹名
-  const folderName = fileName.replace(/\.(glb|gltf)$/i, '');
-  
-  console.log('[语义标签编辑] 开始更新 info.json，文件夹:', folderName);
-  
-  // 1. 从服务器读取现有的 info.json
-  const API_BASE_URL = import.meta.env.VITE_API_BASE_URL;
-  const response = await fetch(`${API_BASE_URL}/get-info-json/${folderName}`);
-  
-  if (!response.ok) {
-    throw new Error('无法读取 info.json: ' + response.statusText);
+
+  // 2. 兼容：将旧 materials 字段迁移到 segments
+  if (!infoData.segments && infoData.materials) {
+    infoData.segments = infoData.materials.map((m, i) => ({
+      id: i,
+      label: m.label || '',
+      color: m.color || '#888888',
+      name: m.name
+    }));
   }
-  
-  const result = await response.json();
-  if (!result.success || !result.data) {
-    throw new Error('info.json 数据无效');
-  }
-  
-  const infoData = result.data;
-  console.log('[语义标签编辑] 成功读取 info.json，材质数:', infoData.materials?.length || 0);
-  
-  // 2. 更新对应材质的标签
+  if (!infoData.segments) infoData.segments = [];
+
+  // 3. 更新对应 segment 的标签（按 name 或 segId 匹配）
   const meshName = formData.meshName;
-  const meshUuid = formData.mesh?.uuid;
-  
+  const segId    = formData.segId;  // 可由父组件传入
+
   let updated = false;
-  if (infoData.materials && Array.isArray(infoData.materials)) {
-    for (const material of infoData.materials) {
-      if (material.name === meshName || material.uuid === meshUuid) {
-        material.label = formData.label.trim();
-        updated = true;
-        console.log('[语义标签编辑] 更新材质标签:', material.name);
-        break;
-      }
+  for (const seg of infoData.segments) {
+    if (seg.id === segId || seg.name === meshName) {
+      seg.label = formData.label.trim();
+      updated = true;
+      break;
     }
   }
-  
+
   if (!updated) {
-    console.warn('[语义标签编辑] 未找到匹配的材质，添加新材质');
-    if (!infoData.materials) {
-      infoData.materials = [];
-    }
-    infoData.materials.push({
+    infoData.segments.push({
+      id: segId ?? infoData.segments.length,
       name: meshName,
-      uuid: meshUuid || '',
-      label: formData.label.trim()
+      label: formData.label.trim(),
+      color: '#888888'
     });
   }
-  
-  // 3. 将更新后的 info.json 保存回服务器
-  const updateResponse = await fetch(`${API_BASE_URL}/update-info-json`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      folderName: folderName,
-      infoData: infoData
-    })
-  });
-  
-  if (!updateResponse.ok) {
-    throw new Error('保存 info.json 失败: ' + updateResponse.statusText);
-  }
-  
-  const updateResult = await updateResponse.json();
-  if (!updateResult.success) {
-    throw new Error('保存 info.json 失败: ' + updateResult.error);
-  }
-  
-  console.log('[语义标签编辑] info.json 更新成功');
+
+  // 4. 保存回服务器
+  await saveModelLabels(modelId, infoData);
+  console.log('[语义标签编辑] labels/info.json 更新成功');
 };
 
 /**
