@@ -540,8 +540,9 @@ app.post('/api/models/:id/segment', (req, res) => {
         writeMeta(id, { ...current, status: 'segmented' });
         console.log(`✅ 分割完成: ${id}`);
       } else {
-        writeMeta(id, { ...current, status: 'segment_failed' });
-        console.error(`❌ 分割失败: ${id}, exit code ${code}`);
+        // 失败时回退到 raw，保证文件仍在未分割队列中可被重试
+        writeMeta(id, { ...current, status: 'raw' });
+        console.error(`❌ 分割失败: ${id}, exit code ${code}，已重置为 raw`);
       }
     });
 

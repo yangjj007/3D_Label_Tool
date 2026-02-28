@@ -1194,7 +1194,6 @@ const waitForSegmentation = async (modelId, numClusters = 10, method = 'agglomer
       const s = await getSegmentStatus(modelId);
       console.log(`[分割等待] ${modelId} 状态: ${s.status}, hasSegments: ${s.hasSegments}`);
       if (s.hasSegments || s.status === 'segmented') return;
-      if (s.status === 'segment_failed') throw new Error(`模型 ${modelId} 分割失败`);
     } catch (pollErr) {
       if (pollErr.message?.includes('分割失败')) throw pollErr;
       console.warn(`[分割等待] 轮询状态失败，继续重试:`, pollErr.message);

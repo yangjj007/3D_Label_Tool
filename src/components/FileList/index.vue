@@ -536,20 +536,18 @@ const formatFileSize = size => {
 };
 
 const STATUS_TEXT = {
-  raw:             '未分割',
-  segmenting:      '分割中',
-  segmented:       '已分割',
-  segment_failed:  '分割失败',
-  labeled:         '已打标',
-  filtered:        '已过滤'
+  raw:        '未分割',
+  segmenting: '分割中',
+  segmented:  '已分割',
+  labeled:    '已打标',
+  filtered:   '已过滤'
 };
 const STATUS_TYPE = {
-  raw:             'info',
-  segmenting:      'warning',
-  segmented:       'primary',
-  segment_failed:  'danger',
-  labeled:         'success',
-  filtered:        'success'
+  raw:        'info',
+  segmenting: 'warning',
+  segmented:  'primary',
+  labeled:    'success',
+  filtered:   'success'
 };
 
 const getLabelStatusText = file => {
