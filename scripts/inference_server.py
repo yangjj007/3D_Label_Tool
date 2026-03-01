@@ -154,7 +154,7 @@ def load_model(ckpt_path):
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         mem_alloc = torch.cuda.memory_allocated() / 1024 ** 2
-        mem_total = torch.cuda.get_device_properties(0).total_mem / 1024 ** 2
+        mem_total = torch.cuda.get_device_properties(0).total_memory / 1024 ** 2
         print(f'[Server] GPU 显存: 模型 {mem_alloc:.0f} MiB / 总计 {mem_total:.0f} MiB',
               flush=True)
 
@@ -379,7 +379,7 @@ class InferenceHandler(BaseHTTPRequestHandler):
             gpu_info = None
             if torch.cuda.is_available():
                 mem_alloc = torch.cuda.memory_allocated() / 1024 ** 2
-                mem_total = torch.cuda.get_device_properties(0).total_mem / 1024 ** 2
+                mem_total = torch.cuda.get_device_properties(0).total_memory / 1024 ** 2
                 gpu_info = f'{mem_alloc:.0f}/{mem_total:.0f} MiB'
             self._send_json(200, {
                 'status': _server_status,
