@@ -159,8 +159,6 @@ class Model(pl.LightningModule):
             if use_cuda_version:
 
                 def sample_points(vertices, faces, n_point_per_face):
-                    # Generate random barycentric coordinates
-                    # borrowed from Kaolin https://github.com/NVIDIAGameWorks/kaolin/blob/master/kaolin/ops/mesh/trianglemesh.py#L43
                     n_f = faces.shape[0]
                     u = torch.sqrt(torch.rand((n_f, n_point_per_face, 1),
                                                 device=vertices.device,
@@ -179,26 +177,49 @@ class Model(pl.LightningModule):
                     return points
 
                 def sample_and_mean_memory_save_version(part_planes, tensor_vertices, n_point_per_face):
-                    n_sample_each = self.cfg.n_sample_each # we iterate over this to avoid OOM
+                    n_sample_each = self.cfg.n_sample_each
                     n_v = tensor_vertices.shape[1]
                     n_sample = n_v // n_sample_each + 1
                     all_sample = []
                     for i_sample in range(n_sample):
                         sampled_feature = sample_triplane_feat(part_planes, tensor_vertices[:, i_sample * n_sample_each: i_sample * n_sample_each + n_sample_each,])
+                        if sampled_feature.shape[1] == 0:
+                            continue
                         assert sampled_feature.shape[1] % n_point_per_face == 0
                         sampled_feature = sampled_feature.reshape(1, -1, n_point_per_face, sampled_feature.shape[-1])
                         sampled_feature = torch.mean(sampled_feature, axis=-2)
                         all_sample.append(sampled_feature)
                     return torch.cat(all_sample, dim=1)
-                
+
                 if self.cfg.vertex_feature:
                     tensor_vertices = batch['vertices'][0].reshape(1, -1, 3).to(torch.float32)
                     point_feat = sample_and_mean_memory_save_version(part_planes, tensor_vertices, 1)
                 else:
                     n_point_per_face = self.cfg.n_point_per_face
-                    tensor_vertices = sample_points(batch['vertices'][0], batch['faces'][0], n_point_per_face)
-                    tensor_vertices = tensor_vertices.reshape(1, -1, 3).to(torch.float32)
-                    point_feat = sample_and_mean_memory_save_version(part_planes, tensor_vertices, n_point_per_face)  # N, M, C
+                    vertices_all = batch['vertices'][0]
+                    faces_all = batch['faces'][0]
+                    n_faces = faces_all.shape[0]
+
+                    # 自动计算分块大小：限制每块顶点张量 ≤ 200MB
+                    max_pts_per_chunk = 200 * 1024 * 1024 // (3 * 4)  # ~16.7M points
+                    face_chunk_size = max(1, max_pts_per_chunk // n_point_per_face)
+
+                    if n_faces <= face_chunk_size:
+                        tensor_vertices = sample_points(vertices_all, faces_all, n_point_per_face)
+                        tensor_vertices = tensor_vertices.reshape(1, -1, 3).to(torch.float32)
+                        point_feat = sample_and_mean_memory_save_version(part_planes, tensor_vertices, n_point_per_face)
+                    else:
+                        print(f"[Memory] 大网格 ({n_faces} 面)，分 {(n_faces + face_chunk_size - 1) // face_chunk_size} 块处理 (每块 {face_chunk_size} 面)")
+                        all_face_feats = []
+                        for fc_start in range(0, n_faces, face_chunk_size):
+                            fc_end = min(fc_start + face_chunk_size, n_faces)
+                            chunk_verts = sample_points(vertices_all, faces_all[fc_start:fc_end], n_point_per_face)
+                            chunk_verts = chunk_verts.reshape(1, -1, 3).to(torch.float32)
+                            chunk_feat = sample_and_mean_memory_save_version(part_planes, chunk_verts, n_point_per_face)
+                            all_face_feats.append(chunk_feat.cpu())
+                            del chunk_verts, chunk_feat
+                            torch.cuda.empty_cache()
+                        point_feat = torch.cat(all_face_feats, dim=1).to(part_planes.device)
 
                 #### Take mean feature in the triangle
                 print("Time elapsed for feature prediction: " + str(time.time() - starttime))

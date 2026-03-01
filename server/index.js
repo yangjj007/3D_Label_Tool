@@ -67,12 +67,16 @@ function startInferenceServer() {
 
   console.log(`🔄 正在启动推理服务 (port=${INFERENCE_PORT}, gpu=${gpu}) ...`);
 
-  inferenceProcess = spawn(pythonCmd, [
+  const fp16 = process.env.PARTFIELD_FP16 === '1' || process.env.PARTFIELD_FP16 === 'true';
+  const serverArgs = [
     path.join(PROJECT_ROOT, 'scripts', 'inference_server.py'),
     '--port', String(INFERENCE_PORT),
     '--gpu', gpu,
     '--ckpt', ckptPath,
-  ], { cwd: PROJECT_ROOT });
+  ];
+  if (fp16) serverArgs.push('--fp16');
+
+  inferenceProcess = spawn(pythonCmd, serverArgs, { cwd: PROJECT_ROOT });
 
   inferenceProcess.stdout.on('data', d =>
     process.stdout.write(`[InferenceServer] ${d}`));
@@ -123,14 +127,17 @@ function pollInferenceHealth() {
  * 通过 HTTP 调用推理服务执行分割，返回 Promise。
  * resolve({ success, ... }) 或 reject(Error)
  */
-function callInferenceServer(modelId, numClusters, method) {
+function callInferenceServer(modelId, numClusters, method, nPointPerFace, nSampleEach) {
   return new Promise((resolve, reject) => {
-    const postData = JSON.stringify({
+    const body = {
       model_id: modelId,
       num_clusters: numClusters,
       method: method,
       models_dir: MODELS_DIR,
-    });
+    };
+    if (nPointPerFace != null) body.n_point_per_face = nPointPerFace;
+    if (nSampleEach != null)   body.n_sample_each = nSampleEach;
+    const postData = JSON.stringify(body);
 
     const req = http.request({
       hostname: '127.0.0.1',
@@ -168,19 +175,23 @@ function callInferenceServer(modelId, numClusters, method) {
 /**
  * Fallback：以子进程方式运行 segment_mesh.py（无预加载）
  */
-function spawnSegmentProcess(id, numClusters, method, meta) {
+function spawnSegmentProcess(id, numClusters, method, meta, nPointPerFace, nSampleEach) {
   const scriptPath = path.join(PROJECT_ROOT, 'scripts', 'segment_mesh.py');
   const pythonCmd  = process.env.PYTHON_CMD || 'python';
   const gpuArg     = process.env.PARTFIELD_GPU || 'auto';
 
-  const child = spawn(pythonCmd, [
+  const args = [
     scriptPath,
     '--model_id', id,
     '--num_clusters', String(numClusters),
     '--method', method,
     '--models_dir', MODELS_DIR,
     '--gpu', gpuArg,
-  ], { cwd: PROJECT_ROOT });
+  ];
+  if (nPointPerFace != null) args.push('--n_point_per_face', String(nPointPerFace));
+  if (nSampleEach != null)   args.push('--n_sample_each', String(nSampleEach));
+
+  const child = spawn(pythonCmd, args, { cwd: PROJECT_ROOT });
 
   child.stdout.on('data', d => process.stdout.write(`[PartField:${id}] ${d}`));
   child.stderr.on('data', d => process.stderr.write(`[PartField:${id}] ${d}`));
@@ -663,7 +674,10 @@ app.delete('/api/models/:id', (req, res) => {
 app.post('/api/models/:id/segment', (req, res) => {
   try {
     const { id } = req.params;
-    const { numClusters = 10, method = 'agglomerative' } = req.body;
+    const {
+      numClusters = 10, method = 'agglomerative',
+      nPointPerFace, nSampleEach,
+    } = req.body;
 
     const meta = readMeta(id);
     if (!meta) return res.status(404).json({ error: '模型不存在' });
@@ -678,7 +692,7 @@ app.post('/api/models/:id/segment', (req, res) => {
     console.log(`[Segment] ${id}: 使用 ${mode} 模式`);
 
     if (inferenceReady) {
-      callInferenceServer(id, numClusters, method)
+      callInferenceServer(id, numClusters, method, nPointPerFace, nSampleEach)
         .then(result => {
           if (result.success) {
             const current = readMeta(id) || meta;
@@ -696,7 +710,7 @@ app.post('/api/models/:id/segment', (req, res) => {
           console.error(`❌ 推理服务调用失败: ${id}: ${err.message}`);
         });
     } else {
-      spawnSegmentProcess(id, numClusters, method, meta);
+      spawnSegmentProcess(id, numClusters, method, meta, nPointPerFace, nSampleEach);
     }
 
     res.json({

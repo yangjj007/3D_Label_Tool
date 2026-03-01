@@ -102,13 +102,15 @@ _gpu_lock = threading.Lock()
 _server_status = 'loading'  # loading → ready | error
 
 
-def load_model(ckpt_path):
+def load_model(ckpt_path, use_fp16=False):
     """创建模型、加载权重、移至 GPU，全程只调用一次。"""
     global _model, _device, _ckpt_path, _server_status
 
     import torch
     from partfield.config.defaults import _C as default_cfg
     from partfield.model_trainer_pvcnn_only_demo import Model
+
+    os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
 
     _ckpt_path = ckpt_path
 
@@ -144,7 +146,13 @@ def load_model(ckpt_path):
     model.load_state_dict(state_dict, strict=False)
 
     _device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f'[Server] 正在将模型移至 {_device} ...', flush=True)
+    dtype_label = 'fp16' if use_fp16 else 'fp32'
+    print(f'[Server] 正在将模型移至 {_device} ({dtype_label}) ...', flush=True)
+
+    if use_fp16 and _device.type == 'cuda':
+        model = model.half()
+        print('[Server] 模型已转为 FP16（显存占用减半）', flush=True)
+
     model = model.to(_device)
     model.eval()
     _model = model
@@ -159,7 +167,7 @@ def load_model(ckpt_path):
               flush=True)
 
     _server_status = 'ready'
-    print(f'[Server] ✅ 模型已就绪 ({_device})', flush=True)
+    print(f'[Server] ✅ 模型已就绪 ({_device}, {dtype_label})', flush=True)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -176,7 +184,8 @@ def _move_batch_to_device(batch, device):
     return out
 
 
-def extract_features_preloaded(model_id, models_dir):
+def extract_features_preloaded(model_id, models_dir,
+                               n_point_per_face=None, n_sample_each=None):
     """使用预加载模型提取特征，跳过模型创建和权重加载。"""
     import torch
     from torch.utils.data import DataLoader
@@ -204,6 +213,10 @@ def extract_features_preloaded(model_id, models_dir):
         _model.cfg.dataset.data_path = data_dir
         _model.cfg.result_name = os.path.basename(feat_dir)
         _model.cfg.output_dir = os.path.dirname(feat_dir)
+        if n_point_per_face is not None:
+            _model.cfg.n_point_per_face = n_point_per_face
+        if n_sample_each is not None:
+            _model.cfg.n_sample_each = n_sample_each
         _model.cfg.freeze()
 
         dataset = Demo_Dataset(_model.cfg)
@@ -288,7 +301,7 @@ def run_clustering(feat_dir, uid, num_clusters, method):
 
 
 def do_segment(model_id, num_clusters=10, method='agglomerative',
-               models_dir=None):
+               models_dir=None, n_point_per_face=None, n_sample_each=None):
     """完整分割管线：特征提取 → 聚类 → 保存结果 → 更新 meta。"""
     if models_dir is None:
         models_dir = os.path.join(PROJECT_ROOT, 'files', 'models')
@@ -302,7 +315,10 @@ def do_segment(model_id, num_clusters=10, method='agglomerative',
 
     # 1. 特征提取（GPU）
     print(f'[Segment] {model_id}: 提取特征 ...', flush=True)
-    feat_dir = extract_features_preloaded(model_id, models_dir)
+    feat_dir = extract_features_preloaded(
+        model_id, models_dir,
+        n_point_per_face=n_point_per_face,
+        n_sample_each=n_sample_each)
     print(f'[Segment] 特征提取完成，耗时 {time.time() - t0:.1f}s', flush=True)
 
     # 2. 聚类（CPU）
@@ -416,9 +432,18 @@ class InferenceHandler(BaseHTTPRequestHandler):
             method = body.get('method', 'agglomerative')
             models_dir = body.get('models_dir')
 
+            n_point_per_face = body.get('n_point_per_face')
+            n_sample_each = body.get('n_sample_each')
+            if n_point_per_face is not None:
+                n_point_per_face = int(n_point_per_face)
+            if n_sample_each is not None:
+                n_sample_each = int(n_sample_each)
+
             with _gpu_lock:
                 result = do_segment(
-                    model_id, num_clusters, method, models_dir)
+                    model_id, num_clusters, method, models_dir,
+                    n_point_per_face=n_point_per_face,
+                    n_sample_each=n_sample_each)
 
             self._send_json(200, result)
 
@@ -440,6 +465,9 @@ def parse_args():
                    default=os.path.join(PROJECT_ROOT,
                                         'partfield-ckpt',
                                         'model_objaverse.ckpt'))
+    p.add_argument('--fp16', action='store_true',
+                   default=os.environ.get('PARTFIELD_FP16', '').lower() in ('1', 'true', 'yes'),
+                   help='使用 FP16 半精度加载模型，显存占用减半')
     return p.parse_args()
 
 
@@ -449,7 +477,7 @@ def main():
     setup_gpu(args.gpu)
 
     try:
-        load_model(args.ckpt)
+        load_model(args.ckpt, use_fp16=args.fp16)
     except Exception:
         global _server_status
         _server_status = 'error'

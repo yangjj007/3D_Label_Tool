@@ -123,13 +123,18 @@ def parse_args():
                         help='Path to PartField checkpoint')
     parser.add_argument('--gpu',          default='auto',
                         help='GPU 选择: "auto"=自动选择最佳GPU, "0"/"1"/...=指定GPU, "cpu"=禁用GPU')
+    parser.add_argument('--n_point_per_face', type=int, default=1000,
+                        help='每面采样点数 (降低可减少显存，默认1000)')
+    parser.add_argument('--n_sample_each', type=int, default=10000,
+                        help='每次采样批次大小 (降低可减少显存，默认10000)')
     return parser.parse_args()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 步骤 1 — 特征提取
 # ──────────────────────────────────────────────────────────────────────────────
-def extract_features(mesh_path: str, uid: str, feat_dir: str, ckpt_path: str):
+def extract_features(mesh_path: str, uid: str, feat_dir: str, ckpt_path: str,
+                     n_point_per_face: int = 1000, n_sample_each: int = 10000):
     """
     通过 PyTorch Lightning 运行 PartField 推理。
     产出：
@@ -156,8 +161,8 @@ def extract_features(mesh_path: str, uid: str, feat_dir: str, ckpt_path: str):
     cfg.triplane_channels_low   = 128
     cfg.triplane_channels_high  = 512
     cfg.triplane_resolution     = 128
-    cfg.n_point_per_face        = 1000
-    cfg.n_sample_each           = 10000
+    cfg.n_point_per_face        = n_point_per_face
+    cfg.n_sample_each           = n_sample_each
     cfg.is_pc                   = False
     cfg.remesh_demo             = False
     cfg.correspondence_demo     = False
@@ -298,8 +303,12 @@ def main():
     feat_dir = os.path.join(PROJECT_ROOT, 'exp_results', f'pf_{args.model_id}')
     print(f'[PartField] 特征目录: {feat_dir}')
 
+    os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
+
     t0 = time.time()
-    extract_features(orig_file, uid, feat_dir, args.ckpt)
+    extract_features(orig_file, uid, feat_dir, args.ckpt,
+                     n_point_per_face=args.n_point_per_face,
+                     n_sample_each=args.n_sample_each)
     print(f'[PartField] 特征提取完成，耗时 {time.time()-t0:.1f}s')
 
     # ── 聚类 ─────────────────────────────────────────────────────────────────
