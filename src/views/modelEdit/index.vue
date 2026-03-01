@@ -458,7 +458,8 @@ const handleBatchDelete = async () => {
   }
 };
 
-const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys, numClusters = 0, method = 'agglomerative' }) => {
+const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys, numClusters = 0, method = 'agglomerative' }, sessionProcessedIds = new Set(), recursionDepth = 0) => {
+  const MAX_RECURSION_DEPTH = 5; // 防止因服务端状态未及时更新导致的无限递归
   // 1. 从服务器获取当前页的raw文件列表
   // 使用 unref 解包可能为 Ref 的属性
   const currentPageVal = unref(fileListRef.value?.currentPage) || 1;
@@ -496,8 +497,12 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys, numCl
       console.warn(`[批量打标] 获取已打标列表失败，将继续处理:`, labeledErr);
     }
 
-    // 3. 在下载前过滤掉已打标的文件
+    // 3. 在下载前过滤掉已打标的文件（含本会话已处理的，防止递归死循环）
     const filesToDownload = rawFiles.filter(file => {
+      if (sessionProcessedIds.has(file.id) || sessionProcessedIds.has(file.name)) {
+        console.log(`[批量打标] 跳过下载文件 ${file.name}: 本会话已处理`);
+        return false;
+      }
       if (labeledFilesSet.has(file.id) || labeledFilesSet.has(file.name)) {
         console.log(`[批量打标] 跳过下载文件 ${file.name}: labeled_files中已存在`);
         return false;
@@ -522,14 +527,18 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys, numCl
 
       console.log(`[批量打标] 当前页所有文件都已打标，剩余未处理: ${totalRemaining}`);
 
-      if (totalRemaining > 0) {
+      if (totalRemaining > 0 && recursionDepth < MAX_RECURSION_DEPTH) {
         ElMessage.info(`当前页已完成，继续处理剩余 ${totalRemaining} 个文件...`);
         if (fileListRef.value) {
           fileListRef.value.fileType = nextSegResp.total > 0 ? 'segmented' : 'raw';
           fileListRef.value.currentPage = 1;
           await fileListRef.value.loadFileList();
         }
-        await handleBatchTagging({ concurrency, gpuConcurrency, viewKeys });
+        await handleBatchTagging({ concurrency, gpuConcurrency, viewKeys }, sessionProcessedIds, recursionDepth + 1);
+        return;
+      } else if (recursionDepth >= MAX_RECURSION_DEPTH && totalRemaining > 0) {
+        console.warn(`[批量打标] 已达最大递归深度 ${MAX_RECURSION_DEPTH}，停止继续处理，剩余 ${totalRemaining} 个文件可能需刷新后重试`);
+        ElMessage.warning('批次处理已暂停，请刷新页面后查看剩余文件');
         return;
       } else {
         ElMessage.success("🎉 所有文件都已打标完成！");
@@ -574,17 +583,13 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys, numCl
     preSegmentNextBatch(1, pageSizeVal, numClusters, method);
 
     // 6. 更新fileStore，使用IndexedDB中的文件
-    console.log(`[批量打标] 从 IndexedDB 读取文件，批次号: ${currentPageVal}`);
+    // 重要：只处理本批次刚下载的文件，避免 IndexedDB 中其他 batchNumber 相同的旧文件被重复处理
+    const downloadedIds = new Set(filesToDownload.map(f => f.id));
+    console.log(`[批量打标] 从 IndexedDB 读取文件，批次号: ${currentPageVal}，本批次下载的 ID: ${[...downloadedIds].join(', ')}`);
     const workspaceFiles = await getAllFiles();
     console.log(`[批量打标] IndexedDB 中总文件数: ${workspaceFiles.length}`);
-    console.log(`[批量打标] IndexedDB 文件列表:`, workspaceFiles.map(f => ({ 
-      id: f.id, 
-      name: f.name, 
-      batchNumber: f.batchNumber,
-      hasBlob: !!f.fileBlob 
-    })));
     
-    const batchFiles = workspaceFiles.filter(f => f.batchNumber === currentPageVal);
+    const batchFiles = workspaceFiles.filter(f => downloadedIds.has(f.id));
     console.log(`[批量打标] 当前批次文件数: ${batchFiles.length}`);
     console.log(`[批量打标] 批次文件:`, batchFiles.map(f => ({ id: f.id, name: f.name })));
     fileStore.setFiles(batchFiles);
@@ -626,14 +631,18 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys, numCl
 
     console.log(`[批量打标] 当前页所有文件都已打标，剩余未处理: ${totalRemaining}`);
 
-    if (totalRemaining > 0) {
+    if (totalRemaining > 0 && recursionDepth < MAX_RECURSION_DEPTH) {
       ElMessage.info(`当前页已完成，继续处理剩余 ${totalRemaining} 个文件...`);
       if (fileListRef.value) {
         fileListRef.value.fileType = nextSegResp.total > 0 ? 'segmented' : 'raw';
         fileListRef.value.currentPage = 1;
         await fileListRef.value.loadFileList();
       }
-      await handleBatchTagging({ concurrency, gpuConcurrency, viewKeys, numClusters, method });
+      await handleBatchTagging({ concurrency, gpuConcurrency, viewKeys, numClusters, method }, sessionProcessedIds, recursionDepth + 1);
+      return;
+    } else if (recursionDepth >= MAX_RECURSION_DEPTH && totalRemaining > 0) {
+      console.warn(`[批量打标] 已达最大递归深度 ${MAX_RECURSION_DEPTH}，停止`);
+      ElMessage.warning('批次处理已暂停，请刷新页面后查看剩余文件');
       return;
     } else {
       ElMessage.success("🎉 所有文件都已打标完成！");
@@ -980,10 +989,13 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys, numCl
         
         console.log(`[批量打标] 图片数据准备完成，整体: ${imageData.overall.length} 张，分割块: ${imageData.segments.length} 张`);
         
-        // 7. 上传文件夹数据到服务器
-        console.log(`[批量打标] 开始上传文件夹结构到服务器...`);
-        await saveLabeledFolder(file.name, originalBlob, infoData, imageData);
+        // 7. 上传文件夹数据到服务器（必须使用 serverFileId 确保写入正确的模型目录）
+        const serverModelId = file.serverFileId || file.id;
+        console.log(`[批量打标] 开始上传文件夹结构到服务器 (modelId: ${serverModelId})...`);
+        await saveLabeledFolder(`${serverModelId}.glb`, originalBlob, infoData, imageData);
         console.log(`[批量打标] 文件夹结构上传成功`);
+        sessionProcessedIds.add(file.id);
+        sessionProcessedIds.add(file.name);
         
         // 8. 删除 IndexedDB 临时文件
         console.log(`[批量打标] 删除 IndexedDB 临时文件...`);
@@ -1111,7 +1123,8 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys, numCl
       fileListRef.value.currentPage = 1;
       await fileListRef.value.loadFileList();
     }
-    await handleBatchTagging({ concurrency, gpuConcurrency, viewKeys });
+    // 本批次已处理完成，重置递归深度（避免误触发深度限制）
+    await handleBatchTagging({ concurrency, gpuConcurrency, viewKeys }, sessionProcessedIds, 0);
   } else {
     ElMessage.success('🎉 所有文件打标完成！');
     if (fileListRef.value && fileListRef.value.switchToLabeled) {
