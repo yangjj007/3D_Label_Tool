@@ -511,36 +511,29 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys }) => 
       ElMessage.info(`跳过 ${skippedBeforeDownload} 个已打标文件，仅下载 ${filesToDownload.length} 个文件`);
     }
 
-    // 如果所有文件都已打标，直接跳转到下一页
+    // 如果所有文件都已打标，重新查询是否还有剩余未处理文件
     if (filesToDownload.length === 0) {
-      const totalPages = Math.ceil(response.total / pageSizeVal);
-      const hasNextPage = currentPageVal < totalPages;
-      
-      console.log(`[批量打标] 当前页所有文件都已打标，当前页: ${currentPageVal}/${totalPages}`);
-      
-      if (hasNextPage) {
-        // 有下一页，自动跳转到下一页继续处理
-        const remainingFiles = response.total - currentPageVal * pageSizeVal;
-        ElMessage.info(`当前页已完成，自动跳转到第 ${currentPageVal + 1} 页继续处理剩余 ${remainingFiles} 个文件...`);
-        console.log(`[批量打标] 自动跳转到第 ${currentPageVal + 1} 页`);
-        
-        // 更新文件列表组件的当前页码并刷新列表
+      // 处理后文件已离开 segmented 列表，必须重新从第 1 页查询剩余文件
+      const nextSegResp = await getServerFileList('segmented', 1, pageSizeVal).catch(() => ({ total: 0, files: [] }));
+      const nextRawResp = nextSegResp.total === 0
+        ? await getServerFileList('raw', 1, pageSizeVal).catch(() => ({ total: 0, files: [] }))
+        : { total: 0, files: [] };
+      const totalRemaining = nextSegResp.total + nextRawResp.total;
+
+      console.log(`[批量打标] 当前页所有文件都已打标，剩余未处理: ${totalRemaining}`);
+
+      if (totalRemaining > 0) {
+        ElMessage.info(`当前页已完成，继续处理剩余 ${totalRemaining} 个文件...`);
         if (fileListRef.value) {
-          // 确保保持在raw(未打标)列表
-          fileListRef.value.fileType = 'raw';
-          fileListRef.value.currentPage = currentPageVal + 1;
+          fileListRef.value.fileType = nextSegResp.total > 0 ? 'segmented' : 'raw';
+          fileListRef.value.currentPage = 1;
           await fileListRef.value.loadFileList();
         }
-        
-        // 递归调用处理下一页
-        await handleBatchTagging({ concurrency, viewKeys });
+        await handleBatchTagging({ concurrency, gpuConcurrency, viewKeys });
         return;
       } else {
-        // 没有下一页了，所有文件都已打标完成
         ElMessage.success("🎉 所有文件都已打标完成！");
         console.log(`[批量打标] 所有文件都已打标完成`);
-        
-        // 所有文件完成后切换到已打标视图
         if (fileListRef.value && fileListRef.value.switchToLabeled) {
           await fileListRef.value.switchToLabeled();
         }
@@ -576,13 +569,9 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys }) => 
     }
     console.log(`[批量打标] 下载完成，成功: ${downloadResults.filter(r => r.status === 'fulfilled').length}/${filesToDownload.length}`);
     
-    // 5. 立即预加载下一页模型 + 后台触发下一页分割（流水线）
-    const currentBatchNumber = currentPageVal;
-    if (response.total > currentPageVal * pageSizeVal) {
-      preloadNextBatch(currentPageVal + 1, pageSizeVal);
-      // 流水线：在打标当前页的同时，后台预分割下一页的 raw 文件
-      preSegmentNextBatch(currentPageVal + 1, pageSizeVal);
-    }
+    // 5. 后台触发下一批 raw 文件的预分割（流水线：不阻塞当前打标）
+    // 处理后文件移出 segmented 列表，剩余 raw 文件会移至第 1 页，始终预分割第 1 页
+    preSegmentNextBatch(1, pageSizeVal);
 
     // 6. 更新fileStore，使用IndexedDB中的文件
     console.log(`[批量打标] 从 IndexedDB 读取文件，批次号: ${currentPageVal}`);
@@ -628,36 +617,27 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys }) => 
   }
 
   if (!untaggedFiles.length) {
-    // 当前页所有文件都已打标，检查是否还有下一页（理论上不会到这里，因为已在下载前判断）
-    const totalPages = Math.ceil(response.total / pageSizeVal);
-    const hasNextPage = currentPageVal < totalPages;
-    
-    console.log(`[批量打标] 当前页所有文件都已打标，当前页: ${currentPageVal}/${totalPages}`);
-    
-    if (hasNextPage) {
-      // 有下一页，自动跳转到下一页继续处理
-      const remainingFiles = response.total - currentPageVal * pageSizeVal;
-      ElMessage.info(`当前页已完成，自动跳转到第 ${currentPageVal + 1} 页继续处理剩余 ${remainingFiles} 个文件...`);
-      console.log(`[批量打标] 自动跳转到第 ${currentPageVal + 1} 页`);
-      
-      // 更新文件列表组件的当前页码并刷新列表
+    // 兜底检查：重新从第 1 页查询剩余未处理文件
+    const nextSegResp = await getServerFileList('segmented', 1, pageSizeVal).catch(() => ({ total: 0, files: [] }));
+    const nextRawResp = nextSegResp.total === 0
+      ? await getServerFileList('raw', 1, pageSizeVal).catch(() => ({ total: 0, files: [] }))
+      : { total: 0, files: [] };
+    const totalRemaining = nextSegResp.total + nextRawResp.total;
+
+    console.log(`[批量打标] 当前页所有文件都已打标，剩余未处理: ${totalRemaining}`);
+
+    if (totalRemaining > 0) {
+      ElMessage.info(`当前页已完成，继续处理剩余 ${totalRemaining} 个文件...`);
       if (fileListRef.value) {
-        // 确保保持在raw(未打标)列表
-        fileListRef.value.fileType = 'raw';
-        fileListRef.value.currentPage = currentPageVal + 1;
+        fileListRef.value.fileType = nextSegResp.total > 0 ? 'segmented' : 'raw';
+        fileListRef.value.currentPage = 1;
         await fileListRef.value.loadFileList();
       }
-      
-      
-      // 递归调用处理下一页
-      await handleBatchTagging({ concurrency, viewKeys });
+      await handleBatchTagging({ concurrency, gpuConcurrency, viewKeys });
       return;
     } else {
-      // 没有下一页了，所有文件都已打标完成
       ElMessage.success("🎉 所有文件都已打标完成！");
       console.log(`[批量打标] 所有文件都已打标完成`);
-      
-      // 所有文件完成后切换到已打标视图
       if (fileListRef.value && fileListRef.value.switchToLabeled) {
         await fileListRef.value.switchToLabeled();
       }
@@ -1116,32 +1096,29 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys }) => 
   
   isBatchProcessing.value = false;
   ElMessage.success(`批次 ${currentPageVal} 打标完成`);
-  
-  // 如果还有下一页，自动继续处理下一批次
-  if (response && response.total > currentPageVal * pageSizeVal) {
-    const remainingFiles = (response?.total || 0) - currentPageVal * pageSizeVal;
-    ElMessage.info(`当前批次已完成，继续处理剩余 ${remainingFiles} 个文件...`);
-    
-    // 继续下一批次 - 保持在 segmented（已分割）或 raw 列表
+
+  // 处理后文件已离开 segmented 列表，必须重新从第 1 页查询剩余未处理文件
+  const nextSegResp = await getServerFileList('segmented', 1, pageSizeVal).catch(() => ({ total: 0, files: [] }));
+  const nextRawResp = nextSegResp.total === 0
+    ? await getServerFileList('raw', 1, pageSizeVal).catch(() => ({ total: 0, files: [] }))
+    : { total: 0, files: [] };
+  const totalRemaining = nextSegResp.total + nextRawResp.total;
+
+  if (totalRemaining > 0) {
+    ElMessage.info(`当前批次已完成，继续处理剩余 ${totalRemaining} 个文件...`);
     if (fileListRef.value) {
-      fileListRef.value.fileType = 'segmented';
-      fileListRef.value.currentPage = currentPageVal + 1;
+      fileListRef.value.fileType = nextSegResp.total > 0 ? 'segmented' : 'raw';
+      fileListRef.value.currentPage = 1;
       await fileListRef.value.loadFileList();
     }
-    
-    // 递归调用，处理下一批次
-    await handleBatchTagging({ concurrency, viewKeys });
+    await handleBatchTagging({ concurrency, gpuConcurrency, viewKeys });
   } else {
-    // 所有批次都完成后，提示用户并切换到已打标视图
     ElMessage.success('🎉 所有文件打标完成！');
-    
-    // 所有批次完成后才切换到已打标视图
     if (fileListRef.value && fileListRef.value.switchToLabeled) {
       await fileListRef.value.switchToLabeled();
     }
   }
-  
-  // 刷新文件列表状态（如果需要）
+
   await loadPersistedFiles();
 };
 
@@ -1517,6 +1494,7 @@ onMounted(async () => {
       try {
         await handleBatchTagging({
           concurrency: options.concurrency || 4,
+          gpuConcurrency: options.gpuConcurrency || 3,
           viewKeys: options.viewKeys || ['axial']
         });
         return { success: true };
