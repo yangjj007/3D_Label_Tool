@@ -943,12 +943,13 @@ class OffscreenRenderModel {
   // ─────────────────────────────────────────────────────────────────────
 
   /**
-   * 按分割掩码建立 segId → meshes 映射，供后续高亮截图使用。
-   * 不再写入顶点色，原始材质外观完全保留。
+   * 按分割掩码建立 segId → [{mesh, faceIndices}] 映射，供后续高亮截图使用。
+   * 不修改原始材质，原始外观完全保留。
    * @param {number[]} faceLabels - 每个面的分割 ID 数组
    */
   applyFaceSegmentation(faceLabels) {
-    const segIdToMeshes = new Map();
+    // segId → [ {mesh, faceIndices: number[]} ]
+    const segIdToFaces = new Map();
 
     this.scene.traverse(obj => {
       if (!(obj instanceof THREE.Mesh)) return;
@@ -959,37 +960,111 @@ class OffscreenRenderModel {
         ? Math.floor(geo.index.count / 3)
         : Math.floor(geo.getAttribute('position').count / 3);
 
+      console.log(`[OffscreenRenderModel] applyFaceSegmentation mesh="${obj.name}" 面数=${faceCount}, faceLabels长度=${faceLabels.length}`);
+
+      // 统计该 mesh 内每个 segId 对应的面序号
+      const segFacesForMesh = new Map();
       for (let f = 0; f < faceCount; f++) {
         const segId = faceLabels[f] ?? 0;
-        if (!segIdToMeshes.has(segId)) segIdToMeshes.set(segId, []);
-        const arr = segIdToMeshes.get(segId);
-        if (!arr.includes(obj)) arr.push(obj);
+        if (!segFacesForMesh.has(segId)) segFacesForMesh.set(segId, []);
+        segFacesForMesh.get(segId).push(f);
+      }
+
+      for (const [segId, faceIndices] of segFacesForMesh) {
+        if (!segIdToFaces.has(segId)) segIdToFaces.set(segId, []);
+        segIdToFaces.get(segId).push({ mesh: obj, faceIndices });
       }
     });
 
-    this._segState = { faceLabels, segIdToMeshes };
+    this._segState = { faceLabels, segIdToFaces };
 
     if (this.outlinePass) {
       this.outlinePass.selectedObjects = [];
     }
 
-    const segCount = segIdToMeshes.size;
-    console.log(`[OffscreenRenderModel] applyFaceSegmentation 完成，共 ${segCount} 个分割块（仅建立映射，不修改材质）`);
+    const segCount = segIdToFaces.size;
+    console.log(`[OffscreenRenderModel] applyFaceSegmentation 完成，共 ${segCount} 个分割块`);
+    for (const [segId, meshFaces] of segIdToFaces) {
+      const totalFaces = meshFaces.reduce((s, { faceIndices }) => s + faceIndices.length, 0);
+      console.log(`  seg${segId}: ${totalFaces} 面`);
+    }
   }
 
   /**
-   * 通过 OutlinePass 高亮指定分割块对应的 mesh 对象，原始材质保持不变。
-   * targetSegId 为 null 时清除所有高亮。
+   * 为目标 segId 的面创建临时幽灵子网格，用 OutlinePass 对其勾边，原始材质保持不变。
+   * targetSegId 为 null 时清除高亮并移除临时网格。
    * @param {number|null} targetSegId
    */
   _highlightSegment(targetSegId) {
     if (!this.outlinePass) return;
+
+    // 清理上一次生成的临时高亮网格
+    if (this._tempHighlightMesh) {
+      this.scene.remove(this._tempHighlightMesh);
+      this._tempHighlightMesh.geometry.dispose();
+      this._tempHighlightMesh.material.dispose();
+      this._tempHighlightMesh = null;
+    }
+
     if (targetSegId === null || !this._segState) {
       this.outlinePass.selectedObjects = [];
       return;
     }
-    const meshes = this._segState.segIdToMeshes?.get(targetSegId) ?? [];
-    this.outlinePass.selectedObjects = meshes;
+
+    const segFaces = this._segState.segIdToFaces?.get(targetSegId);
+    if (!segFaces || segFaces.length === 0) {
+      console.warn(`[OffscreenRenderModel] _highlightSegment: segId=${targetSegId} 没有找到对应面数据，跳过高亮`);
+      this.outlinePass.selectedObjects = [];
+      return;
+    }
+
+    const totalFaces = segFaces.reduce((s, { faceIndices }) => s + faceIndices.length, 0);
+    console.log(`[OffscreenRenderModel] _highlightSegment segId=${targetSegId}, 共 ${totalFaces} 面`);
+
+    // 从目标 segId 的所有面中提取顶点坐标，构建临时网格（世界坐标空间）
+    const positions = [];
+    for (const { mesh, faceIndices } of segFaces) {
+      mesh.updateMatrixWorld(true);
+      const geo = mesh.geometry;
+      const posAttr = geo.getAttribute('position');
+      const localVec = new THREE.Vector3();
+
+      for (const fi of faceIndices) {
+        if (geo.index) {
+          const idx = geo.index;
+          for (let k = 0; k < 3; k++) {
+            const vi = idx.getX(fi * 3 + k);
+            localVec.set(posAttr.getX(vi), posAttr.getY(vi), posAttr.getZ(vi));
+            localVec.applyMatrix4(mesh.matrixWorld);
+            positions.push(localVec.x, localVec.y, localVec.z);
+          }
+        } else {
+          for (let k = 0; k < 3; k++) {
+            const vi = fi * 3 + k;
+            localVec.set(posAttr.getX(vi), posAttr.getY(vi), posAttr.getZ(vi));
+            localVec.applyMatrix4(mesh.matrixWorld);
+            positions.push(localVec.x, localVec.y, localVec.z);
+          }
+        }
+      }
+    }
+
+    // 创建临时几何体（仅包含目标分割块的三角面）
+    const tempGeo = new THREE.BufferGeometry();
+    tempGeo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+
+    // 透明不可见材质：不写入颜色/深度，仅作为 OutlinePass 的识别目标
+    const tempMat = new THREE.MeshBasicMaterial({
+      colorWrite: false,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+
+    this._tempHighlightMesh = new THREE.Mesh(tempGeo, tempMat);
+    this.scene.add(this._tempHighlightMesh);
+
+    this.outlinePass.selectedObjects = [this._tempHighlightMesh];
+    console.log(`[OffscreenRenderModel] _highlightSegment: 临时网格已创建，顶点数=${positions.length / 3}`);
   }
 
   /**
