@@ -14,6 +14,8 @@ inference_server.py — PartField 推理服务器
 API:
     GET  /health  → {"status":"ready","device":"cuda:0"}
     POST /segment → body: {"model_id","num_clusters","method","models_dir"}
+                    method: "agglomerative" | "kmeans" | "hdbscan"
+                    num_clusters: 0=自动, >0=固定; hdbscan 时忽略此字段
                   ← {"success":true,...} | {"success":false,"error":"..."}
 """
 
@@ -307,7 +309,12 @@ def run_clustering(feat_dir, uid, num_clusters, method, auto_max_clusters=20):
     norms = np.where(norms == 0, 1, norms)
     point_feat = point_feat / norms
 
-    mode_label = f'自动（上限{auto_max_clusters}）' if auto_mode else str(num_clusters)
+    if method == 'hdbscan':
+        mode_label = '全自动（HDBSCAN）'
+    elif auto_mode:
+        mode_label = f'自动（上限{auto_max_clusters}）'
+    else:
+        mode_label = str(num_clusters)
     print(f'[Clustering] 特征形状: {point_feat.shape}, '
           f'方法: {method}, 目标簇数: {mode_label}')
 
@@ -334,6 +341,35 @@ def run_clustering(feat_dir, uid, num_clusters, method, auto_max_clusters=20):
             labels = KMeans(
                 n_clusters=num_clusters, random_state=0, n_init='auto'
             ).fit(point_feat).labels_
+    elif method == 'hdbscan':
+        # ── HDBSCAN：全自动密度聚类，无需指定簇数 ──────────────────
+        # min_cluster_size 自适应：取样本数 1%，下限 5，上限 50
+        min_cs = max(5, min(50, len(point_feat) // 100))
+        print(f'[HDBSCAN] 样本数={len(point_feat)}, min_cluster_size={min_cs}')
+        try:
+            from sklearn.cluster import HDBSCAN as _HDBSCAN
+            clusterer = _HDBSCAN(min_cluster_size=min_cs, n_jobs=-1)
+            labels_raw = clusterer.fit_predict(point_feat)
+        except ImportError:
+            import hdbscan as _hdbscan_lib
+            clusterer = _hdbscan_lib.HDBSCAN(
+                min_cluster_size=min_cs, core_dist_n_jobs=-1)
+            labels_raw = clusterer.fit_predict(point_feat)
+
+        # 将噪声点（label=-1）分配给最近的有效簇
+        noise_mask = (labels_raw == -1)
+        if noise_mask.any():
+            valid_mask = ~noise_mask
+            if valid_mask.any():
+                from sklearn.neighbors import NearestNeighbors
+                nn = NearestNeighbors(n_neighbors=1, algorithm='auto')
+                nn.fit(point_feat[valid_mask])
+                _, idx = nn.kneighbors(point_feat[noise_mask])
+                labels_raw[noise_mask] = labels_raw[valid_mask][idx.flatten()]
+            else:
+                labels_raw[:] = 0
+        print(f'[HDBSCAN] 自动发现簇数: {len(np.unique(labels_raw))}')
+        labels = labels_raw
     else:
         # ── 凝聚聚类（Agglomerative）──────────────────────────────
         partfield_main = os.path.join(PROJECT_ROOT, 'PartField-main')

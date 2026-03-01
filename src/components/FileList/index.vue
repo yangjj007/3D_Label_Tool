@@ -209,9 +209,10 @@
           <el-radio-group v-model="clusterMethod" size="small">
             <el-radio-button value="agglomerative">凝聚聚类</el-radio-button>
             <el-radio-button value="kmeans">K-Means</el-radio-button>
+            <el-radio-button value="hdbscan">HDBSCAN</el-radio-button>
           </el-radio-group>
         </div>
-        <div class="config-item">
+        <div v-if="clusterMethod !== 'hdbscan'" class="config-item">
           <span class="label">簇数选择:</span>
           <el-radio-group v-model="clusterMode" size="small">
             <el-radio-button value="auto">
@@ -220,12 +221,15 @@
             <el-radio-button value="manual">手动指定</el-radio-button>
           </el-radio-group>
         </div>
-        <div v-if="clusterMode === 'manual'" class="config-item">
+        <div v-if="clusterMethod !== 'hdbscan' && clusterMode === 'manual'" class="config-item">
           <span class="label">目标簇数:</span>
           <el-input-number v-model="clusterNum" :min="2" :max="50" size="small" />
         </div>
         <div class="config-sub-tip" style="margin-top: 4px;">
-          <template v-if="clusterMethod === 'kmeans' && clusterMode === 'auto'">
+          <template v-if="clusterMethod === 'hdbscan'">
+            全自动密度聚类：无需指定簇数，由算法根据特征密度分布自动发现最优分区
+          </template>
+          <template v-else-if="clusterMethod === 'kmeans' && clusterMode === 'auto'">
             自动模式：K = 每个模型的材质数（批量处理时从该模型动态获取）
           </template>
           <template v-else-if="clusterMode === 'auto'">
@@ -403,8 +407,8 @@ const gpuConcurrency = ref(10); // GPU 并发数
 const selectedViewKeys = ref(["axial"]);
 
 // 聚类配置
-const clusterMethod = ref('agglomerative');   // 'agglomerative' | 'kmeans'
-const clusterMode   = ref('auto');             // 'auto' | 'manual'
+const clusterMethod = ref('agglomerative');   // 'agglomerative' | 'kmeans' | 'hdbscan'
+const clusterMode   = ref('auto');             // 'auto' | 'manual'（hdbscan 时无效）
 const clusterNum    = ref(10);                 // 手动模式下的目标簇数
 
 // 过滤对话框引用
@@ -528,7 +532,10 @@ const startBatchTagging = () => {
 
   let numClusters;
   let useMaterialCountAsK = false;
-  if (clusterMode.value === 'auto') {
+  if (clusterMethod.value === 'hdbscan') {
+    // HDBSCAN 全自动，不需要指定簇数，后端会忽略此字段
+    numClusters = 0;
+  } else if (clusterMode.value === 'auto') {
     if (clusterMethod.value === 'kmeans') {
       // KMeans 自动（贴图数量）：处理时从每个模型动态获取材质数作为 K
       useMaterialCountAsK = true;
