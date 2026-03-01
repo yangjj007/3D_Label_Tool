@@ -290,7 +290,7 @@ def run_clustering(feat_dir, uid, num_clusters, method):
         hierarchical = hierarchical_clustering_labels(
             clustering.children_, point_feat.shape[0],
             max_cluster=num_clusters)
-        labels = (np.array(hierarchical[-1]) if hierarchical
+        labels = (np.array(hierarchical[0]) if hierarchical
                   else np.zeros(len(point_feat), dtype=int))
 
     unique = np.unique(labels)
