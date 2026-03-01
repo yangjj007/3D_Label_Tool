@@ -226,10 +226,7 @@
         </div>
         <div class="config-sub-tip" style="margin-top: 4px;">
           <template v-if="clusterMethod === 'kmeans' && clusterMode === 'auto'">
-            自动模式：K = 当前已加载模型的材质数
-            <span :style="{ color: materialCount > 0 ? '#67c23a' : '#f56c6c', fontWeight: 'bold' }">
-              （当前材质数：{{ materialCount > 0 ? materialCount : '未加载模型' }}）
-            </span>
+            自动模式：K = 每个模型的材质数（批量处理时从该模型动态获取）
           </template>
           <template v-else-if="clusterMode === 'auto'">
             自动模式：由凝聚树形图的最大间距跳跃自动决定最优簇数，无需手动指定
@@ -360,11 +357,6 @@ import { Loading, QuestionFilled, DataAnalysis } from '@element-plus/icons-vue';
 import { getServerFileList, downloadModelFromServer } from '@/utils/serverApi';
 import { listFolderFiles, getAllFiles } from '@/utils/filePersistence';
 import FilterDialog from '@/components/FilterDialog/index.vue';
-import { useMeshEditStore } from '@/store/meshEditStore';
-
-const meshStore = useMeshEditStore();
-// 当前已加载模型的材质数（用于 KMeans 自动模式）
-const materialCount = computed(() => meshStore.modelApi?.modelMaterialList?.length || 0);
 
 const props = defineProps({
   files: {
@@ -535,14 +527,12 @@ const startBatchTagging = () => {
   }
 
   let numClusters;
+  let useMaterialCountAsK = false;
   if (clusterMode.value === 'auto') {
     if (clusterMethod.value === 'kmeans') {
-      // KMeans 自动模式：用当前已加载模型的材质数作为 K
-      if (materialCount.value === 0) {
-        ElMessage.warning("请先在右侧加载一个模型，以获取材质数作为 KMeans 的 K 值");
-        return;
-      }
-      numClusters = materialCount.value;
+      // KMeans 自动（贴图数量）：处理时从每个模型动态获取材质数作为 K
+      useMaterialCountAsK = true;
+      numClusters = null; // 占位，实际 K 在处理每个模型时从该模型获取
     } else {
       // 凝聚聚类自动模式：numClusters=0 触发后端树形图间距法
       numClusters = 0;
@@ -558,6 +548,7 @@ const startBatchTagging = () => {
     viewKeys: selectedViewKeys.value,
     numClusters,
     method: clusterMethod.value,
+    useMaterialCountAsK,
   });
 };
 

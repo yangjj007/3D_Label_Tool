@@ -458,7 +458,7 @@ const handleBatchDelete = async () => {
   }
 };
 
-const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys, numClusters = 0, method = 'agglomerative' }, sessionProcessedIds = new Set(), recursionDepth = 0) => {
+const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys, numClusters = 0, method = 'agglomerative', useMaterialCountAsK = false }, sessionProcessedIds = new Set(), recursionDepth = 0) => {
   const MAX_RECURSION_DEPTH = 5; // 防止因服务端状态未及时更新导致的无限递归
   // 1. 从服务器获取当前页的raw文件列表
   // 使用 unref 解包可能为 Ref 的属性
@@ -534,7 +534,7 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys, numCl
           fileListRef.value.currentPage = 1;
           await fileListRef.value.loadFileList();
         }
-        await handleBatchTagging({ concurrency, gpuConcurrency, viewKeys }, sessionProcessedIds, recursionDepth + 1);
+        await handleBatchTagging({ concurrency, gpuConcurrency, viewKeys, numClusters, method, useMaterialCountAsK }, sessionProcessedIds, recursionDepth + 1);
         return;
       } else if (recursionDepth >= MAX_RECURSION_DEPTH && totalRemaining > 0) {
         console.warn(`[批量打标] 已达最大递归深度 ${MAX_RECURSION_DEPTH}，停止继续处理，剩余 ${totalRemaining} 个文件可能需刷新后重试`);
@@ -579,8 +579,10 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys, numCl
     console.log(`[批量打标] 下载完成，成功: ${downloadResults.filter(r => r.status === 'fulfilled').length}/${filesToDownload.length}`);
     
     // 5. 后台触发下一批 raw 文件的预分割（流水线：不阻塞当前打标）
-    // 处理后文件移出 segmented 列表，剩余 raw 文件会移至第 1 页，始终预分割第 1 页
-    preSegmentNextBatch(1, pageSizeVal, numClusters, method);
+    // useMaterialCountAsK 时无法预知各模型材质数，跳过预分割；处理时按模型动态触发
+    if (!useMaterialCountAsK) {
+      preSegmentNextBatch(1, pageSizeVal, numClusters, method);
+    }
 
     // 6. 更新fileStore，使用IndexedDB中的文件
     // 重要：只处理本批次刚下载的文件，避免 IndexedDB 中其他 batchNumber 相同的旧文件被重复处理
@@ -638,7 +640,7 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys, numCl
         fileListRef.value.currentPage = 1;
         await fileListRef.value.loadFileList();
       }
-      await handleBatchTagging({ concurrency, gpuConcurrency, viewKeys, numClusters, method }, sessionProcessedIds, recursionDepth + 1);
+      await handleBatchTagging({ concurrency, gpuConcurrency, viewKeys, numClusters, method, useMaterialCountAsK }, sessionProcessedIds, recursionDepth + 1);
       return;
     } else if (recursionDepth >= MAX_RECURSION_DEPTH && totalRemaining > 0) {
       console.warn(`[批量打标] 已达最大递归深度 ${MAX_RECURSION_DEPTH}，停止`);
@@ -782,8 +784,14 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys, numCl
           
           // 3. 确保模型已分割（若未分割则自动触发并等待完成）
           const serverFileId = file.serverFileId || file.id;
+          let effectiveNumClusters = numClusters;
+          if (useMaterialCountAsK) {
+            const materials = offscreenRenderer.getMaterialList?.() || [];
+            effectiveNumClusters = Math.max(2, materials.length);
+            console.log(`[批量打标] 自动（贴图数量）：${file.name} 材质数=${materials.length}，K=${effectiveNumClusters}`);
+          }
           console.log(`[批量打标] 确保分割完成，serverFileId: ${serverFileId}`);
-          await waitForSegmentation(serverFileId, numClusters, method);
+          await waitForSegmentation(serverFileId, effectiveNumClusters, method);
 
           // 4. 获取分割掩码
           console.log(`[批量打标] 获取分割掩码`);
@@ -1124,7 +1132,7 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys, numCl
       await fileListRef.value.loadFileList();
     }
     // 本批次已处理完成，重置递归深度（避免误触发深度限制）
-    await handleBatchTagging({ concurrency, gpuConcurrency, viewKeys }, sessionProcessedIds, 0);
+    await handleBatchTagging({ concurrency, gpuConcurrency, viewKeys, numClusters, method, useMaterialCountAsK }, sessionProcessedIds, 0);
   } else {
     ElMessage.success('🎉 所有文件打标完成！');
     if (fileListRef.value && fileListRef.value.switchToLabeled) {
