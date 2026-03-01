@@ -214,7 +214,9 @@
         <div class="config-item">
           <span class="label">簇数选择:</span>
           <el-radio-group v-model="clusterMode" size="small">
-            <el-radio-button value="auto">自动（树形图间距法）</el-radio-button>
+            <el-radio-button value="auto">
+              {{ clusterMethod === 'kmeans' ? '自动（贴图数量）' : '自动（树形图间距法）' }}
+            </el-radio-button>
             <el-radio-button value="manual">手动指定</el-radio-button>
           </el-radio-group>
         </div>
@@ -223,7 +225,15 @@
           <el-input-number v-model="clusterNum" :min="2" :max="50" size="small" />
         </div>
         <div class="config-sub-tip" style="margin-top: 4px;">
-          自动模式：由凝聚树形图的最大间距跳跃自动决定最优簇数，无需手动指定
+          <template v-if="clusterMethod === 'kmeans' && clusterMode === 'auto'">
+            自动模式：K = 当前已加载模型的材质数
+            <span :style="{ color: materialCount > 0 ? '#67c23a' : '#f56c6c', fontWeight: 'bold' }">
+              （当前材质数：{{ materialCount > 0 ? materialCount : '未加载模型' }}）
+            </span>
+          </template>
+          <template v-else-if="clusterMode === 'auto'">
+            自动模式：由凝聚树形图的最大间距跳跃自动决定最优簇数，无需手动指定
+          </template>
         </div>
         <div class="config-tip">
           ⚠️ 注意：并行数和GPU并发数过高可能导致浏览器卡顿、接口限流或GPU过载
@@ -350,6 +360,11 @@ import { Loading, QuestionFilled, DataAnalysis } from '@element-plus/icons-vue';
 import { getServerFileList, downloadModelFromServer } from '@/utils/serverApi';
 import { listFolderFiles, getAllFiles } from '@/utils/filePersistence';
 import FilterDialog from '@/components/FilterDialog/index.vue';
+import { useMeshEditStore } from '@/store/meshEditStore';
+
+const meshStore = useMeshEditStore();
+// 当前已加载模型的材质数（用于 KMeans 自动模式）
+const materialCount = computed(() => meshStore.modelApi?.modelMaterialList?.length || 0);
 
 const props = defineProps({
   files: {
@@ -518,9 +533,25 @@ const startBatchTagging = () => {
     ElMessage.warning("请至少选择一个截图视角");
     return;
   }
+
+  let numClusters;
+  if (clusterMode.value === 'auto') {
+    if (clusterMethod.value === 'kmeans') {
+      // KMeans 自动模式：用当前已加载模型的材质数作为 K
+      if (materialCount.value === 0) {
+        ElMessage.warning("请先在右侧加载一个模型，以获取材质数作为 KMeans 的 K 值");
+        return;
+      }
+      numClusters = materialCount.value;
+    } else {
+      // 凝聚聚类自动模式：numClusters=0 触发后端树形图间距法
+      numClusters = 0;
+    }
+  } else {
+    numClusters = clusterNum.value;
+  }
+
   showBatchTagDialog.value = false;
-  // numClusters=0 → 后端自动模式（树形图间距法）；>0 → 固定簇数
-  const numClusters = clusterMode.value === 'auto' ? 0 : clusterNum.value;
   emit("batch-tag", { 
     concurrency: batchConcurrency.value,
     gpuConcurrency: gpuConcurrency.value,
