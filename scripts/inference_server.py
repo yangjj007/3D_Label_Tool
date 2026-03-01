@@ -287,9 +287,40 @@ def run_clustering(feat_dir, uid, num_clusters, method):
             mesh.faces, mesh.vertices, with_knn=True)
         clustering = AgglomerativeClustering(
             connectivity=adj, n_clusters=1).fit(point_feat)
+
+        n_samples = point_feat.shape[0]
+        children_ = clustering.children_
+        print(f'[Debug] n_samples={n_samples}, children_ 形状={children_.shape}, '
+              f'children_ 行数={len(children_)}, max_cluster={num_clusters}')
+        print(f'[Debug] children_ 中最大节点编号={children_.max()}, '
+              f'期望内部节点范围=[{n_samples}, {2*n_samples-2}]')
+
         hierarchical = hierarchical_clustering_labels(
-            clustering.children_, point_feat.shape[0],
+            children_, n_samples,
             max_cluster=num_clusters)
+
+        print(f'[Debug] hierarchical 长度={len(hierarchical)}')
+        if hierarchical:
+            for idx, h in enumerate(hierarchical[:3]):
+                arr = np.array(h)
+                print(f'[Debug]   hierarchical[{idx}]: 唯一值数量={len(np.unique(arr))}, '
+                      f'前10个值={arr[:10].tolist()}')
+            if len(hierarchical) > 1:
+                arr_last = np.array(hierarchical[-1])
+                print(f'[Debug]   hierarchical[-1]: 唯一值数量={len(np.unique(arr_last))}')
+        else:
+            print(f'[Debug] ⚠️  hierarchical 为空！手动检查条件...')
+            current_cluster_count = n_samples
+            triggered_at = None
+            for i, (c1, c2) in enumerate(children_):
+                current_cluster_count -= 1
+                if current_cluster_count <= num_clusters:
+                    triggered_at = i
+                    break
+            print(f'[Debug]   条件 current_cluster_count <= {num_clusters} 在 i={triggered_at} 触发')
+            print(f'[Debug]   children_ 总长度={len(children_)}, '
+                  f'n_samples-1={n_samples-1}')
+
         labels = (np.array(hierarchical[0]) if hierarchical
                   else np.zeros(len(point_feat), dtype=int))
 
