@@ -4,7 +4,7 @@ import axios from 'axios';
 class MultiImageVLM {
   constructor(config = {}) {
     this.apiKey = config.apiKey || '';
-    this.baseUrl = config.baseUrl?.trim() || 'https://aihubmix.com';
+    this.baseUrl = this._normalizeBaseUrl(config.baseUrl?.trim() || 'https://aihubmix.com');
     this.modelName = config.modelName || 'gpt-4o';
     this.temperature = config.temperature || 0.3;
     this.maxRetries = config.maxRetries || 3;
@@ -13,6 +13,15 @@ class MultiImageVLM {
     this.siteName = config.siteName || '';
     this.useProxy = config.useProxy !== false; // 默认使用代理
     this.proxyUrl = config.proxyUrl || this._getProxyUrl();
+  }
+
+  _normalizeBaseUrl(url) {
+    if (!url) return url;
+    url = url.replace(/\/+$/, '');
+    if (url.endsWith('/v1')) {
+      url = url.slice(0, -3);
+    }
+    return url;
   }
 
   // 获取代理URL
@@ -29,8 +38,7 @@ class MultiImageVLM {
   init(config) {
     if (config.apiKey) this.apiKey = config.apiKey;
     if (config.baseUrl) {
-      this.baseUrl = config.baseUrl.trim();
-      // 重新计算代理URL
+      this.baseUrl = this._normalizeBaseUrl(config.baseUrl.trim());
       this.proxyUrl = this._getProxyUrl();
     }
     if (config.modelName) this.modelName = config.modelName;

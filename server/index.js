@@ -969,8 +969,11 @@ app.post('/api/prompts-library', (req, res) => {
 // ────────────────────────────────────────────────────────────
 app.post('/api/vlm-proxy', async (req, res) => {
   try {
-    const { baseUrl, apiKey, requestBody, headers: customHeaders = {} } = req.body;
-    if (!baseUrl) return res.status(400).json({ error: 'baseUrl参数缺失' });
+    const { baseUrl: rawBaseUrl, apiKey, requestBody, headers: customHeaders = {} } = req.body;
+    if (!rawBaseUrl) return res.status(400).json({ error: 'baseUrl参数缺失' });
+
+    let baseUrl = rawBaseUrl.replace(/\/+$/, '');
+    if (baseUrl.endsWith('/v1')) baseUrl = baseUrl.slice(0, -3);
 
     const proxyHeaders = { 'Content-Type': 'application/json', ...customHeaders };
     if (apiKey) proxyHeaders['Authorization'] = `Bearer ${apiKey}`;
