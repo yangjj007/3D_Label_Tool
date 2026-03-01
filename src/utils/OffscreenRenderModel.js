@@ -310,9 +310,9 @@ class OffscreenRenderModel {
       this.camera
     );
     
-    // 配置 OutlinePass（参考主应用的配置）
+    // 配置 OutlinePass（与主界面 renderModel.js 保持一致，黄色边框）
     this.outlinePass.visibleEdgeColor = new THREE.Color('#FFFF00'); // 黄色边框
-    this.outlinePass.hiddenEdgeColor = new THREE.Color('#FFFF00'); // 黄色边框
+    this.outlinePass.hiddenEdgeColor = new THREE.Color('#FFFF00');  // 黄色边框
     this.outlinePass.edgeGlow = 2.0; // 发光强度
     this.outlinePass.edgeThickness = 2.0; // 边缘浓度（加粗）
     this.outlinePass.edgeStrength = 5.0; // 边缘强度（增强）
@@ -939,157 +939,61 @@ class OffscreenRenderModel {
   }
 
   // ─────────────────────────────────────────────────────────────────────
-  // 分割掩码高亮（基于顶点色，与 renderModel.js 逻辑镜像对应）
+  // 分割掩码高亮（基于 OutlinePass 橙色边缘，保留原始材质外观）
   // ─────────────────────────────────────────────────────────────────────
 
-  /** 固定 32 色调色板（与 renderModel.js 保持一致） */
-  static PALETTE = [
-    '#E6194B','#3CB44B','#4363D8','#F58231','#911EB4',
-    '#42D4F4','#F032E6','#BFEF45','#FABED4','#469990',
-    '#DCBEFF','#9A6324','#FFFAC8','#800000','#AAFFC3',
-    '#808000','#FFD8B1','#000075','#A9A9A9','#FFFFFF',
-    '#E6BEFF','#AA6E28','#FFFACD','#800080','#008080',
-    '#FF6347','#40E0D0','#EE82EE','#F5DEB3','#808080',
-    '#FFA500','#00FFFF'
-  ];
-
   /**
-   * 按分割掩码为场景中所有 Mesh 写入顶点色，并存储分割状态。
-   * 调用后可通过 captureSegmentWithViews 对某个段进行高亮截图。
-   * @param {number[]} faceLabels - 每个面的分割 ID 数组（长度 = 总面数）
+   * 按分割掩码建立 segId → meshes 映射，供后续高亮截图使用。
+   * 不再写入顶点色，原始材质外观完全保留。
+   * @param {number[]} faceLabels - 每个面的分割 ID 数组
    */
   applyFaceSegmentation(faceLabels) {
-    const segIds = [...new Set(faceLabels)].sort((a, b) => a - b);
-    const segmentColors = new Map();
-    segIds.forEach((id, i) => {
-      segmentColors.set(id, OffscreenRenderModel.PALETTE[i % OffscreenRenderModel.PALETTE.length]);
-    });
-
-    this._segState = { faceLabels, segmentColors };
+    const segIdToMeshes = new Map();
 
     this.scene.traverse(obj => {
       if (!(obj instanceof THREE.Mesh)) return;
       const geo = obj.geometry;
-      if (!geo) return;
-      const posAttr = geo.getAttribute('position');
-      if (!posAttr) return;
+      if (!geo || !geo.getAttribute('position')) return;
 
-      const vertexCount = posAttr.count;
-      const colorArray = new Float32Array(vertexCount * 3);
+      const faceCount = geo.index
+        ? Math.floor(geo.index.count / 3)
+        : Math.floor(geo.getAttribute('position').count / 3);
 
-      if (geo.index) {
-        const idx = geo.index;
-        const faceCount = Math.floor(idx.count / 3);
-        for (let f = 0; f < faceCount; f++) {
-          const segId = faceLabels[f] ?? 0;
-          const color = new THREE.Color(segmentColors.get(segId) ?? '#888888');
-          for (let k = 0; k < 3; k++) {
-            const vi = idx.getX(f * 3 + k);
-            colorArray[vi * 3]     = color.r;
-            colorArray[vi * 3 + 1] = color.g;
-            colorArray[vi * 3 + 2] = color.b;
-          }
-        }
-      } else {
-        const faceCount = Math.floor(vertexCount / 3);
-        for (let f = 0; f < faceCount; f++) {
-          const segId = faceLabels[f] ?? 0;
-          const color = new THREE.Color(segmentColors.get(segId) ?? '#888888');
-          for (let k = 0; k < 3; k++) {
-            const vi = f * 3 + k;
-            colorArray[vi * 3]     = color.r;
-            colorArray[vi * 3 + 1] = color.g;
-            colorArray[vi * 3 + 2] = color.b;
-          }
-        }
-      }
-
-      geo.setAttribute('color', new THREE.BufferAttribute(colorArray, 3));
-      geo.attributes.color.needsUpdate = true;
-
-      const applyVC = (mat) => {
-        if (!mat) return;
-        mat._origVertexColors = mat.vertexColors;
-        mat.vertexColors = true;
-        mat.needsUpdate = true;
-      };
-      if (Array.isArray(obj.material)) {
-        obj.material.forEach(applyVC);
-      } else {
-        applyVC(obj.material);
+      for (let f = 0; f < faceCount; f++) {
+        const segId = faceLabels[f] ?? 0;
+        if (!segIdToMeshes.has(segId)) segIdToMeshes.set(segId, []);
+        const arr = segIdToMeshes.get(segId);
+        if (!arr.includes(obj)) arr.push(obj);
       }
     });
 
-    // 清除 OutlinePass，避免与顶点色冲突
+    this._segState = { faceLabels, segIdToMeshes };
+
     if (this.outlinePass) {
       this.outlinePass.selectedObjects = [];
     }
 
-    console.log(`[OffscreenRenderModel] applyFaceSegmentation 完成，共 ${segIds.length} 个分割块`);
+    const segCount = segIdToMeshes.size;
+    console.log(`[OffscreenRenderModel] applyFaceSegmentation 完成，共 ${segCount} 个分割块（仅建立映射，不修改材质）`);
   }
 
   /**
-   * 高亮指定分割块（选中块保持原色，其余块 RGB × 0.3 暗化）。
-   * targetSegId 为 null 时恢复全色。
+   * 通过 OutlinePass 高亮指定分割块对应的 mesh 对象，原始材质保持不变。
+   * targetSegId 为 null 时清除所有高亮。
    * @param {number|null} targetSegId
    */
   _highlightSegment(targetSegId) {
-    if (!this._segState) return;
-    const { faceLabels, segmentColors } = this._segState;
-
-    this.scene.traverse(obj => {
-      if (!(obj instanceof THREE.Mesh)) return;
-      const geo = obj.geometry;
-      if (!geo) return;
-      const colorAttr = geo.getAttribute('color');
-      if (!colorAttr) return;
-
-      const posAttr = geo.getAttribute('position');
-      const vertexCount = posAttr.count;
-      const colorArray = new Float32Array(colorAttr.array);
-
-      const setFaceColor = (fi, color) => {
-        if (geo.index) {
-          const idx = geo.index;
-          for (let k = 0; k < 3; k++) {
-            const vi = idx.getX(fi * 3 + k);
-            colorArray[vi * 3]     = color.r;
-            colorArray[vi * 3 + 1] = color.g;
-            colorArray[vi * 3 + 2] = color.b;
-          }
-        } else {
-          for (let k = 0; k < 3; k++) {
-            const vi = fi * 3 + k;
-            colorArray[vi * 3]     = color.r;
-            colorArray[vi * 3 + 1] = color.g;
-            colorArray[vi * 3 + 2] = color.b;
-          }
-        }
-      };
-
-      const faceCount = geo.index
-        ? Math.floor(geo.index.count / 3)
-        : Math.floor(vertexCount / 3);
-
-      for (let f = 0; f < faceCount; f++) {
-        const segId = faceLabels[f] ?? 0;
-        let color;
-        if (targetSegId === null || segId === targetSegId) {
-          color = new THREE.Color(segmentColors.get(segId) ?? '#888888');
-        } else {
-          const base = new THREE.Color(segmentColors.get(segId) ?? '#888888');
-          color = new THREE.Color(base.r * 0.3, base.g * 0.3, base.b * 0.3);
-        }
-        setFaceColor(f, color);
-      }
-
-      colorAttr.array.set(colorArray);
-      colorAttr.needsUpdate = true;
-    });
+    if (!this.outlinePass) return;
+    if (targetSegId === null || !this._segState) {
+      this.outlinePass.selectedObjects = [];
+      return;
+    }
+    const meshes = this._segState.segIdToMeshes?.get(targetSegId) ?? [];
+    this.outlinePass.selectedObjects = meshes;
   }
 
   /**
-   * 高亮指定分割块并进行多视角截图，截图后恢复全色。
+   * 通过 OutlinePass 高亮指定分割块并进行多视角截图，截图后清除高亮。
    * 调用前须先调用 applyFaceSegmentation()。
    * @param {number} segId - 要截图的分割块 ID
    * @param {string[]} viewKeys - 视角列表
