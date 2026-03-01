@@ -615,6 +615,54 @@ def hierarchical_clustering_labels(children, n_samples, max_cluster=20):
     
     return hierarchical_labels
 
+
+def find_optimal_k(distances, max_num_clusters):
+    """
+    Automatically determine the optimal number of clusters by locating
+    the largest jump in merge distances within the [2, max_num_clusters] range.
+
+    In the agglomerative dendrogram, each merge step has an associated distance.
+    A sudden large jump means that two very dissimilar clusters were forced to
+    merge — the optimal cut sits just before that jump.
+
+    Parameters
+    ----------
+    distances : np.ndarray, shape (n_samples - 1,)
+        Merge distances from AgglomerativeClustering (compute_distances=True),
+        sorted in ascending order.
+    max_num_clusters : int
+        Upper bound on the number of clusters to consider.
+
+    Returns
+    -------
+    optimal_k : int
+        Estimated best number of clusters in [2, max_num_clusters].
+    gaps : np.ndarray
+        Gap values used for selection (useful for debugging / visualisation).
+    """
+    n = len(distances)  # == n_samples - 1
+    if n < 2:
+        return 2, np.array([])
+
+    # Only inspect the tail of the dendrogram that corresponds to
+    # reducing from max_num_clusters down to 1 cluster.
+    start = max(0, n - max_num_clusters)
+    relevant = distances[start:]   # length == min(n, max_num_clusters)
+
+    if len(relevant) < 2:
+        return 2, np.array([])
+
+    gaps = np.diff(relevant)
+    best_gap_idx = int(np.argmax(gaps))
+
+    # relevant[j] corresponds to having (len(relevant) - j) clusters remaining.
+    # The large gap is *between* relevant[best_gap_idx] and relevant[best_gap_idx+1],
+    # meaning the merge that reduces to (len(relevant) - best_gap_idx - 1) clusters
+    # is expensive.  We therefore stop one step earlier.
+    optimal_k = len(relevant) - best_gap_idx
+    optimal_k = max(2, min(optimal_k, max_num_clusters))
+    return optimal_k, gaps
+
 def load_ply_to_numpy(filename):
     """
     Load a PLY file and extract the point cloud as a (N, 3) NumPy array.
@@ -636,7 +684,7 @@ def load_ply_to_numpy(filename):
     
     return points
 
-def solve_clustering(input_fname, uid, view_id, save_dir="test_results1", out_render_fol= "test_render_clustering", use_agglo=False, max_num_clusters=18, is_pc=False, option=1, with_knn=True, export_mesh=True):
+def solve_clustering(input_fname, uid, view_id, save_dir="test_results1", out_render_fol= "test_render_clustering", use_agglo=False, max_num_clusters=18, is_pc=False, option=1, with_knn=True, export_mesh=True, auto_k=False):
     print(uid, view_id)
     
     if not is_pc:
@@ -704,11 +752,20 @@ def solve_clustering(input_fname, uid, view_id, save_dir="test_results1", out_re
 
         clustering = AgglomerativeClustering(connectivity=adj_matrix,
                                     n_clusters=1,
+                                    compute_distances=True,
                                     ).fit(point_feat)
         hierarchical_labels = hierarchical_clustering_labels(clustering.children_, point_feat.shape[0], max_cluster=max_num_clusters)
 
+        # ── Auto-K: find the optimal number of clusters from merge distances ──
+        if auto_k:
+            optimal_k, gaps = find_optimal_k(clustering.distances_, max_num_clusters)
+            print(f"[auto_k] merge-distance gaps: {np.round(gaps, 4)}")
+            print(f"[auto_k] optimal number of clusters for {uid}: {optimal_k}")
+        # ──────────────────────────────────────────────────────────────────────
+
         all_FL = []
-        for n_cluster in range(max_num_clusters):
+        actual_max = len(hierarchical_labels)  # may be < max_num_clusters for small meshes
+        for n_cluster in range(actual_max):
             print("Processing cluster: "+str(n_cluster))
             labels = hierarchical_labels[n_cluster]
             all_FL.append(labels)
@@ -717,21 +774,40 @@ def solve_clustering(input_fname, uid, view_id, save_dir="test_results1", out_re
         all_FL = np.array(all_FL)
         unique_labels = np.unique(all_FL)
 
-        for n_cluster in range(max_num_clusters):
+        V = mesh.vertices
+        F = mesh.faces
+
+        for n_cluster in range(actual_max):
             FL = all_FL[n_cluster]
             relabel = np.zeros((len(FL), 1))
             for i, label in enumerate(unique_labels):
                 relabel[FL == label] = i  # Assign RGB values to each label
 
-            V = mesh.vertices
-            F = mesh.faces
+            k_label = actual_max - n_cluster  # k clusters this entry represents
 
-            if export_mesh :
-                fname_mesh = os.path.join(out_render_fol, "ply", str(uid) + "_" + str(view_id) + "_" + str(max_num_clusters - n_cluster).zfill(2) + ".ply")
+            if export_mesh:
+                fname_mesh = os.path.join(out_render_fol, "ply", str(uid) + "_" + str(view_id) + "_" + str(k_label).zfill(2) + ".ply")
                 export_colored_mesh_ply(V, F, FL, filename=fname_mesh)
 
-            fname_clustering = os.path.join(out_render_fol, "cluster_out", str(uid) + "_" + str(view_id) + "_" + str(max_num_clusters - n_cluster).zfill(2))
+            fname_clustering = os.path.join(out_render_fol, "cluster_out", str(uid) + "_" + str(view_id) + "_" + str(k_label).zfill(2))
             np.save(fname_clustering, FL)
+
+        # ── Auto-K: save the best result with a dedicated "_auto" suffix ──────
+        if auto_k:
+            # hierarchical_labels[0] == actual_max clusters,
+            # hierarchical_labels[actual_max - optimal_k] == optimal_k clusters
+            auto_idx = actual_max - optimal_k
+            auto_idx = max(0, min(auto_idx, actual_max - 1))
+            FL_auto = all_FL[auto_idx]
+
+            if export_mesh:
+                fname_mesh_auto = os.path.join(out_render_fol, "ply", str(uid) + "_" + str(view_id) + "_auto_k" + str(optimal_k).zfill(2) + ".ply")
+                export_colored_mesh_ply(V, F, FL_auto, filename=fname_mesh_auto)
+
+            fname_auto = os.path.join(out_render_fol, "cluster_out", str(uid) + "_" + str(view_id) + "_auto_k" + str(optimal_k).zfill(2))
+            np.save(fname_auto, FL_auto)
+            print(f"[auto_k] saved best segmentation ({optimal_k} clusters) → {fname_auto}.npy")
+        # ──────────────────────────────────────────────────────────────────────
         
         
             
@@ -747,6 +823,11 @@ if __name__ == '__main__':
     parser.add_argument('--is_pc', default= False, type=bool)
     parser.add_argument('--option', default= 1, type=int)
     parser.add_argument('--with_knn', default= False, type=bool)
+    parser.add_argument('--auto_k', default= False, type=bool,
+                        help='Automatically select the best number of clusters from '
+                             'the agglomerative merge-distance dendrogram. '
+                             'Requires --use_agglo True. The chosen result is saved '
+                             'with a "_auto_kXX" suffix alongside the full sweep.')
 
     parser.add_argument('--export_mesh', default= True, type=bool)
 
@@ -761,6 +842,7 @@ if __name__ == '__main__':
 
     OPTION = FLAGS.option
     WITH_KNN = FLAGS.with_knn
+    AUTO_K = FLAGS.auto_k
 
     EXPORT_MESH = FLAGS.export_mesh
 
@@ -803,4 +885,4 @@ if __name__ == '__main__':
         uid = model.split(".")[-2]
         view_id = 0
 
-        solve_clustering(fname, uid, view_id, save_dir=root, out_render_fol= OUTPUT_FOL, use_agglo=USE_AGGLO, max_num_clusters=MAX_NUM_CLUSTERS, is_pc=IS_PC, option=OPTION, with_knn=WITH_KNN, export_mesh=EXPORT_MESH)
+        solve_clustering(fname, uid, view_id, save_dir=root, out_render_fol= OUTPUT_FOL, use_agglo=USE_AGGLO, max_num_clusters=MAX_NUM_CLUSTERS, is_pc=IS_PC, option=OPTION, with_knn=WITH_KNN, export_mesh=EXPORT_MESH, auto_k=AUTO_K)

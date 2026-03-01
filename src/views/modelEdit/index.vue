@@ -458,7 +458,7 @@ const handleBatchDelete = async () => {
   }
 };
 
-const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys }) => {
+const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys, numClusters = 0, method = 'agglomerative' }) => {
   // 1. 从服务器获取当前页的raw文件列表
   // 使用 unref 解包可能为 Ref 的属性
   const currentPageVal = unref(fileListRef.value?.currentPage) || 1;
@@ -571,7 +571,7 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys }) => 
     
     // 5. 后台触发下一批 raw 文件的预分割（流水线：不阻塞当前打标）
     // 处理后文件移出 segmented 列表，剩余 raw 文件会移至第 1 页，始终预分割第 1 页
-    preSegmentNextBatch(1, pageSizeVal);
+    preSegmentNextBatch(1, pageSizeVal, numClusters, method);
 
     // 6. 更新fileStore，使用IndexedDB中的文件
     console.log(`[批量打标] 从 IndexedDB 读取文件，批次号: ${currentPageVal}`);
@@ -633,7 +633,7 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys }) => 
         fileListRef.value.currentPage = 1;
         await fileListRef.value.loadFileList();
       }
-      await handleBatchTagging({ concurrency, gpuConcurrency, viewKeys });
+      await handleBatchTagging({ concurrency, gpuConcurrency, viewKeys, numClusters, method });
       return;
     } else {
       ElMessage.success("🎉 所有文件都已打标完成！");
@@ -774,7 +774,7 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys }) => 
           // 3. 确保模型已分割（若未分割则自动触发并等待完成）
           const serverFileId = file.serverFileId || file.id;
           console.log(`[批量打标] 确保分割完成，serverFileId: ${serverFileId}`);
-          await waitForSegmentation(serverFileId);
+          await waitForSegmentation(serverFileId, numClusters, method);
 
           // 4. 获取分割掩码
           console.log(`[批量打标] 获取分割掩码`);

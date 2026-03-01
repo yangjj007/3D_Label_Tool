@@ -204,6 +204,27 @@
             </el-button>
           </div>
         </div>
+        <div class="config-item">
+          <span class="label">分割方法:</span>
+          <el-radio-group v-model="clusterMethod" size="small">
+            <el-radio-button value="agglomerative">凝聚聚类</el-radio-button>
+            <el-radio-button value="kmeans">K-Means</el-radio-button>
+          </el-radio-group>
+        </div>
+        <div class="config-item">
+          <span class="label">簇数选择:</span>
+          <el-radio-group v-model="clusterMode" size="small">
+            <el-radio-button value="auto">自动（树形图间距法）</el-radio-button>
+            <el-radio-button value="manual">手动指定</el-radio-button>
+          </el-radio-group>
+        </div>
+        <div v-if="clusterMode === 'manual'" class="config-item">
+          <span class="label">目标簇数:</span>
+          <el-input-number v-model="clusterNum" :min="2" :max="50" size="small" />
+        </div>
+        <div class="config-sub-tip" style="margin-top: 4px;">
+          自动模式：由凝聚树形图的最大间距跳跃自动决定最优簇数，无需手动指定
+        </div>
         <div class="config-tip">
           ⚠️ 注意：并行数和GPU并发数过高可能导致浏览器卡顿、接口限流或GPU过载
         </div>
@@ -374,6 +395,11 @@ const batchConcurrency = ref(10);
 const gpuConcurrency = ref(10); // GPU 并发数
 const selectedViewKeys = ref(["axial"]);
 
+// 聚类配置
+const clusterMethod = ref('agglomerative');   // 'agglomerative' | 'kmeans'
+const clusterMode   = ref('auto');             // 'auto' | 'manual'
+const clusterNum    = ref(10);                 // 手动模式下的目标簇数
+
 // 过滤对话框引用
 const filterDialogRef = ref(null);
 
@@ -493,10 +519,14 @@ const startBatchTagging = () => {
     return;
   }
   showBatchTagDialog.value = false;
+  // numClusters=0 → 后端自动模式（树形图间距法）；>0 → 固定簇数
+  const numClusters = clusterMode.value === 'auto' ? 0 : clusterNum.value;
   emit("batch-tag", { 
     concurrency: batchConcurrency.value,
     gpuConcurrency: gpuConcurrency.value,
-    viewKeys: selectedViewKeys.value
+    viewKeys: selectedViewKeys.value,
+    numClusters,
+    method: clusterMethod.value,
   });
 };
 
