@@ -7,7 +7,16 @@ segment_mesh.py — PartField 分割脚本
         --num_clusters <int, 默认10> \
         --method  <agglomerative|kmeans, 默认agglomerative> \
         --models_dir <files/models 路径> \
-        --ckpt  <模型权重路径>
+        --ckpt  <模型权重路径> \
+        --gpu   <auto|0|1|...|cpu>
+
+GPU 选择:
+    --gpu auto  自动选择空闲显存最大的 GPU（默认）
+    --gpu 0     使用 GPU 0
+    --gpu 1     使用 GPU 1
+    --gpu cpu   禁用 GPU，使用 CPU
+
+也可通过环境变量 PARTFIELD_GPU 指定（服务端优先级更高）。
 
 输出 (files/models/{model_id}/segments/):
     mesh.ply          — PartField 预处理后的三角网格
@@ -20,6 +29,7 @@ import argparse
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -36,6 +46,73 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# GPU 自动选择（在 import torch 之前设置 CUDA_VISIBLE_DEVICES）
+# ──────────────────────────────────────────────────────────────────────────────
+def select_best_gpu():
+    """
+    通过 nvidia-smi 查询所有 GPU 的显存使用情况，
+    返回空闲显存最多的 GPU 索引（int），查询失败返回 None。
+    """
+    try:
+        result = subprocess.run(
+            ['nvidia-smi', '--query-gpu=index,memory.used,memory.total,utilization.gpu',
+             '--format=csv,noheader,nounits'],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return None
+
+        best_idx, best_free = None, -1
+        for line in result.stdout.strip().split('\n'):
+            parts = [p.strip() for p in line.split(',')]
+            if len(parts) < 4:
+                continue
+            idx        = int(parts[0])
+            mem_used   = float(parts[1])   # MiB
+            mem_total  = float(parts[2])   # MiB
+            gpu_util   = float(parts[3])   # %
+            mem_free   = mem_total - mem_used
+            # 优先选空闲显存最大的；显存相同时选利用率最低的
+            score = mem_free * 1000 - gpu_util
+            if score > best_free:
+                best_free = score
+                best_idx  = idx
+            print(f'  GPU {idx}: {mem_used:.0f}/{mem_total:.0f} MiB used, '
+                  f'{mem_free:.0f} MiB free, utilization {gpu_util:.0f}%')
+
+        return best_idx
+    except Exception as e:
+        print(f'[GPU] nvidia-smi 查询失败: {e}')
+        return None
+
+
+def setup_gpu(gpu_arg: str):
+    """
+    根据 --gpu 参数设置 CUDA_VISIBLE_DEVICES。
+    必须在 import torch 之前调用。
+      'auto'  → 自动选择空闲显存最大的 GPU
+      数字    → 直接指定 GPU 索引（如 '0', '1'）
+      'cpu'   → 禁用 GPU
+    """
+    if gpu_arg == 'cpu':
+        os.environ['CUDA_VISIBLE_DEVICES'] = ''
+        print('[GPU] 已禁用 GPU，将使用 CPU')
+        return
+
+    if gpu_arg == 'auto':
+        print('[GPU] 正在自动选择最佳 GPU ...')
+        best = select_best_gpu()
+        if best is not None:
+            os.environ['CUDA_VISIBLE_DEVICES'] = str(best)
+            print(f'[GPU] 自动选择 → GPU {best}')
+        else:
+            print('[GPU] 自动选择失败，使用默认 GPU')
+    else:
+        os.environ['CUDA_VISIBLE_DEVICES'] = gpu_arg
+        print(f'[GPU] 手动指定 → GPU {gpu_arg}')
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description='PartField mesh segmentation')
     parser.add_argument('--model_id',     required=True,  help='Model ID (folder name under models_dir)')
@@ -44,6 +121,8 @@ def parse_args():
     parser.add_argument('--models_dir',   default=os.path.join(PROJECT_ROOT, 'files', 'models'))
     parser.add_argument('--ckpt',         default=os.path.join(PROJECT_ROOT, 'partfield-ckpt', 'model_objaverse.ckpt'),
                         help='Path to PartField checkpoint')
+    parser.add_argument('--gpu',          default='auto',
+                        help='GPU 选择: "auto"=自动选择最佳GPU, "0"/"1"/...=指定GPU, "cpu"=禁用GPU')
     return parser.parse_args()
 
 
@@ -190,6 +269,9 @@ def run_clustering(feat_dir: str, uid: str, num_clusters: int, method: str):
 # ──────────────────────────────────────────────────────────────────────────────
 def main():
     args = parse_args()
+
+    # 在 import torch 之前设置 CUDA_VISIBLE_DEVICES
+    setup_gpu(args.gpu)
 
     model_dir = os.path.join(args.models_dir, args.model_id)
     seg_dir   = os.path.join(model_dir, 'segments')

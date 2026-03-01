@@ -4,6 +4,7 @@ const express = require('express');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const http = require('http');
 const cors = require('cors');
 const { spawn } = require('child_process');
 
@@ -42,6 +43,159 @@ const TEMP_CHUNKS_DIR = path.join(PROJECT_ROOT, 'temp-chunks');
 console.log('📂 服务器目录配置:');
 console.log(`   MODELS_DIR: ${MODELS_DIR}`);
 console.log(`   TEMP_CHUNKS_DIR: ${TEMP_CHUNKS_DIR}`);
+
+// ────────────────────────────────────────────────────────────
+// PartField 推理服务管理（预加载模型到 GPU）
+// ────────────────────────────────────────────────────────────
+const INFERENCE_PORT = parseInt(process.env.PARTFIELD_PORT || '5555', 10);
+const INFERENCE_URL  = `http://127.0.0.1:${INFERENCE_PORT}`;
+let inferenceReady   = false;
+let inferenceProcess = null;
+let inferenceRestarting = false;
+
+function startInferenceServer() {
+  const pythonCmd = process.env.PYTHON_CMD || 'python';
+  const gpu       = process.env.PARTFIELD_GPU || 'auto';
+  const ckptPath  = process.env.PARTFIELD_CKPT ||
+    path.join(PROJECT_ROOT, 'partfield-ckpt', 'model_objaverse.ckpt');
+
+  if (!fs.existsSync(ckptPath)) {
+    console.warn(`⚠️  推理服务未启动：找不到模型权重 ${ckptPath}`);
+    console.warn('   分割将使用 fallback 模式（每次启动新进程）');
+    return;
+  }
+
+  console.log(`🔄 正在启动推理服务 (port=${INFERENCE_PORT}, gpu=${gpu}) ...`);
+
+  inferenceProcess = spawn(pythonCmd, [
+    path.join(PROJECT_ROOT, 'scripts', 'inference_server.py'),
+    '--port', String(INFERENCE_PORT),
+    '--gpu', gpu,
+    '--ckpt', ckptPath,
+  ], { cwd: PROJECT_ROOT });
+
+  inferenceProcess.stdout.on('data', d =>
+    process.stdout.write(`[InferenceServer] ${d}`));
+  inferenceProcess.stderr.on('data', d =>
+    process.stderr.write(`[InferenceServer] ${d}`));
+
+  inferenceProcess.on('close', (code) => {
+    console.error(`[InferenceServer] 进程退出 (code=${code})`);
+    inferenceReady = false;
+    inferenceProcess = null;
+    if (!inferenceRestarting) {
+      inferenceRestarting = true;
+      setTimeout(() => {
+        inferenceRestarting = false;
+        console.log('[InferenceServer] 正在重启 ...');
+        startInferenceServer();
+      }, 10000);
+    }
+  });
+
+  pollInferenceHealth();
+}
+
+function pollInferenceHealth() {
+  const check = () => {
+    http.get(`${INFERENCE_URL}/health`, (res) => {
+      let body = '';
+      res.on('data', d => body += d);
+      res.on('end', () => {
+        try {
+          const data = JSON.parse(body);
+          if (data.status === 'ready') {
+            inferenceReady = true;
+            console.log(`✅ 推理服务已就绪 (${data.device}, ${data.gpu_memory || 'N/A'})`);
+            return;
+          }
+        } catch { /* ignore */ }
+        setTimeout(check, 3000);
+      });
+    }).on('error', () => {
+      setTimeout(check, 3000);
+    });
+  };
+  setTimeout(check, 5000);
+}
+
+/**
+ * 通过 HTTP 调用推理服务执行分割，返回 Promise。
+ * resolve({ success, ... }) 或 reject(Error)
+ */
+function callInferenceServer(modelId, numClusters, method) {
+  return new Promise((resolve, reject) => {
+    const postData = JSON.stringify({
+      model_id: modelId,
+      num_clusters: numClusters,
+      method: method,
+      models_dir: MODELS_DIR,
+    });
+
+    const req = http.request({
+      hostname: '127.0.0.1',
+      port: INFERENCE_PORT,
+      path: '/segment',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(postData),
+      },
+      timeout: 600000,
+    }, (res) => {
+      let body = '';
+      res.on('data', chunk => body += chunk);
+      res.on('end', () => {
+        try {
+          resolve(JSON.parse(body));
+        } catch (e) {
+          reject(new Error(`推理服务响应解析失败: ${body.slice(0, 200)}`));
+        }
+      });
+    });
+
+    req.on('error', reject);
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error('推理服务请求超时'));
+    });
+
+    req.write(postData);
+    req.end();
+  });
+}
+
+/**
+ * Fallback：以子进程方式运行 segment_mesh.py（无预加载）
+ */
+function spawnSegmentProcess(id, numClusters, method, meta) {
+  const scriptPath = path.join(PROJECT_ROOT, 'scripts', 'segment_mesh.py');
+  const pythonCmd  = process.env.PYTHON_CMD || 'python';
+  const gpuArg     = process.env.PARTFIELD_GPU || 'auto';
+
+  const child = spawn(pythonCmd, [
+    scriptPath,
+    '--model_id', id,
+    '--num_clusters', String(numClusters),
+    '--method', method,
+    '--models_dir', MODELS_DIR,
+    '--gpu', gpuArg,
+  ], { cwd: PROJECT_ROOT });
+
+  child.stdout.on('data', d => process.stdout.write(`[PartField:${id}] ${d}`));
+  child.stderr.on('data', d => process.stderr.write(`[PartField:${id}] ${d}`));
+
+  child.on('close', code => {
+    const current = readMeta(id) || meta;
+    if (code === 0) {
+      writeMeta(id, { ...current, status: 'segmented' });
+      console.log(`✅ 分割完成 (fallback): ${id}`);
+    } else {
+      writeMeta(id, { ...current, status: 'raw' });
+      console.error(`❌ 分割失败 (fallback): ${id}, exit code ${code}`);
+    }
+  });
+}
 
 // multer（内存存储，用于分块上传 & 文件保存）
 const uploadChunk = multer({
@@ -504,6 +658,7 @@ app.delete('/api/models/:id', (req, res) => {
 // ────────────────────────────────────────────────────────────
 // POST /api/models/:id/segment  — 触发 PartField 分割
 // body: { numClusters, method }
+// 优先通过预加载推理服务执行，若服务未就绪则 fallback 到子进程
 // ────────────────────────────────────────────────────────────
 app.post('/api/models/:id/segment', (req, res) => {
   try {
@@ -517,36 +672,41 @@ app.post('/api/models/:id/segment', (req, res) => {
       return res.status(409).json({ error: '分割正在进行中' });
     }
 
-    // 更新状态为 segmenting
     writeMeta(id, { ...meta, status: 'segmenting' });
 
-    const scriptPath = path.join(PROJECT_ROOT, 'scripts', 'segment_mesh.py');
-    const pythonCmd  = process.env.PYTHON_CMD || 'python';
+    const mode = inferenceReady ? 'preloaded' : 'fallback';
+    console.log(`[Segment] ${id}: 使用 ${mode} 模式`);
 
-    const child = spawn(pythonCmd, [
-      scriptPath,
-      '--model_id', id,
-      '--num_clusters', String(numClusters),
-      '--method', method,
-      '--models_dir', MODELS_DIR
-    ], { cwd: PROJECT_ROOT });
+    if (inferenceReady) {
+      callInferenceServer(id, numClusters, method)
+        .then(result => {
+          if (result.success) {
+            const current = readMeta(id) || meta;
+            writeMeta(id, { ...current, status: 'segmented' });
+            console.log(`✅ 分割完成: ${id} (${result.elapsed}s)`);
+          } else {
+            const current = readMeta(id) || meta;
+            writeMeta(id, { ...current, status: 'raw' });
+            console.error(`❌ 分割失败: ${id}: ${result.error}`);
+          }
+        })
+        .catch(err => {
+          const current = readMeta(id) || meta;
+          writeMeta(id, { ...current, status: 'raw' });
+          console.error(`❌ 推理服务调用失败: ${id}: ${err.message}`);
+        });
+    } else {
+      spawnSegmentProcess(id, numClusters, method, meta);
+    }
 
-    child.stdout.on('data', d => process.stdout.write(`[PartField:${id}] ${d}`));
-    child.stderr.on('data', d => process.stderr.write(`[PartField:${id}] ${d}`));
-
-    child.on('close', code => {
-      const current = readMeta(id) || meta;
-      if (code === 0) {
-        writeMeta(id, { ...current, status: 'segmented' });
-        console.log(`✅ 分割完成: ${id}`);
-      } else {
-        // 失败时回退到 raw，保证文件仍在未分割队列中可被重试
-        writeMeta(id, { ...current, status: 'raw' });
-        console.error(`❌ 分割失败: ${id}, exit code ${code}，已重置为 raw`);
-      }
+    res.json({
+      success: true,
+      message: '分割任务已启动',
+      modelId: id,
+      numClusters,
+      method,
+      mode,
     });
-
-    res.json({ success: true, message: '分割任务已启动', modelId: id, numClusters, method });
   } catch (err) {
     console.error('启动分割失败:', err);
     res.status(500).json({ error: err.message });
@@ -821,6 +981,11 @@ app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
+    inference: {
+      ready: inferenceReady,
+      port: INFERENCE_PORT,
+      pid: inferenceProcess?.pid || null,
+    },
     directories: {
       models: fs.existsSync(MODELS_DIR),
       tempChunks: fs.existsSync(TEMP_CHUNKS_DIR)
@@ -831,11 +996,26 @@ app.get('/api/health', (req, res) => {
 // ────────────────────────────────────────────────────────────
 // 启动
 // ────────────────────────────────────────────────────────────
-// 启动时扫描并整理游离 Mesh 文件
 scanAndOrganizeOrphanedFiles();
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 服务器运行在 http://0.0.0.0:${PORT}`);
   console.log(`📁 模型目录: ${MODELS_DIR}`);
   console.log(`📁 临时块目录: ${TEMP_CHUNKS_DIR}`);
+
+  // 在 HTTP 服务启动后，拉起推理服务（异步加载模型）
+  startInferenceServer();
+});
+
+// 优雅退出：关闭推理服务子进程
+process.on('SIGINT', () => {
+  if (inferenceProcess) {
+    console.log('\n正在关闭推理服务 ...');
+    inferenceProcess.kill('SIGINT');
+  }
+  process.exit(0);
+});
+process.on('SIGTERM', () => {
+  if (inferenceProcess) inferenceProcess.kill('SIGTERM');
+  process.exit(0);
 });
