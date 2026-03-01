@@ -296,23 +296,38 @@ def run_clustering(feat_dir: str, uid: str, num_clusters: int, method: str,
             labels = KMeans(n_clusters=num_clusters, random_state=0, n_init='auto').fit(point_feat).labels_
     elif method == 'hdbscan':
         # ── HDBSCAN：全自动密度聚类，无需指定簇数 ──────────────────
-        # min_cluster_size 自适应：取样本数 1%，下限 5，上限 50
+        # 特征维度通常为 448，直接跑 HDBSCAN 会导致 KD 树退化为 O(n²)。
+        # 先用 PCA 降到 32 维，使 KD 树恢复 O(n log n) 效率（约快 10-50x）。
+        from sklearn.decomposition import PCA
+        n_pca = min(32, point_feat.shape[1], point_feat.shape[0] - 1)
+        if n_pca < point_feat.shape[1]:
+            pca = PCA(n_components=n_pca, random_state=0)
+            feat_hdb = pca.fit_transform(point_feat)
+            print(f'[HDBSCAN] PCA {point_feat.shape[1]}→{n_pca} 维，'
+                  f'方差保留 {pca.explained_variance_ratio_.sum():.1%}')
+        else:
+            feat_hdb = point_feat
+
+        # min_samples=5：固定邻域密度阈值，不随 min_cluster_size 膨胀，
+        # 避免生成过多噪声点（噪声越多，后续 KNN 回退越慢）
         min_cs = max(5, min(50, len(point_feat) // 100))
         print(f'[HDBSCAN] 样本数={len(point_feat)}, min_cluster_size={min_cs}')
         try:
             from sklearn.cluster import HDBSCAN as _HDBSCAN
-            clusterer = _HDBSCAN(min_cluster_size=min_cs, n_jobs=-1)
-            labels_raw = clusterer.fit_predict(point_feat)
+            clusterer = _HDBSCAN(min_cluster_size=min_cs, min_samples=5, n_jobs=-1)
+            labels_raw = clusterer.fit_predict(feat_hdb)
         except ImportError:
             import hdbscan as _hdbscan_lib
             clusterer = _hdbscan_lib.HDBSCAN(
-                min_cluster_size=min_cs, core_dist_n_jobs=-1)
-            labels_raw = clusterer.fit_predict(point_feat)
+                min_cluster_size=min_cs, min_samples=5, core_dist_n_jobs=-1)
+            labels_raw = clusterer.fit_predict(feat_hdb)
 
-        # 将噪声点（label=-1）分配给最近的有效簇
+        # 将噪声点（label=-1）用原始高维特征做 KNN 分配（更准确）
         noise_mask = (labels_raw == -1)
         if noise_mask.any():
+            n_noise = noise_mask.sum()
             valid_mask = ~noise_mask
+            print(f'[HDBSCAN] 噪声点数: {n_noise}，回退 KNN 分配...')
             if valid_mask.any():
                 from sklearn.neighbors import NearestNeighbors
                 nn = NearestNeighbors(n_neighbors=1, algorithm='auto')
