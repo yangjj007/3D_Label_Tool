@@ -245,9 +245,52 @@ def extract_features_preloaded(model_id, models_dir,
     return feat_dir
 
 
-def run_clustering(feat_dir, uid, num_clusters, method):
-    """读取特征 NPY，运行聚类。与 segment_mesh.py 逻辑一致。"""
+def find_optimal_k_from_distances(distances, min_k=2, max_k=20):
+    """
+    最大间距法（Dendrogram Gap）自动确定最优聚类数。
+
+    原理：凝聚聚类每次合并两个最近的簇，合并代价记录在 distances_ 中。
+    当把 k+1 个簇合并为 k 个的代价远大于把 k+2 合并为 k+1 的代价时，
+    说明 k+1 个簇之间界限清晰，是自然的停止点。
+
+    distances[i]：第 i+1 次合并时的代价（按合并顺序，从小到大）。
+    合并 k+1 → k 个簇对应的索引：distances[n_samples - k - 1]
+    """
+    n_samples = len(distances) + 1
+    hi = min(max_k, n_samples - 1)
+    lo = max(min_k, 2)
+
+    if lo >= hi:
+        return lo
+
+    best_k = lo
+    best_gap = -np.inf
+
+    for k in range(lo, hi):
+        idx_this = n_samples - k - 1   # 合并 k+1 → k 的代价索引
+        idx_next = n_samples - k - 2   # 合并 k+2 → k+1 的代价索引
+        if idx_this < 0 or idx_next < 0:
+            continue
+        gap = float(distances[idx_this]) - float(distances[idx_next])
+        if gap > best_gap:
+            best_gap = gap
+            best_k = k + 1  # 大跳升说明 k+1 个簇是自然停止点
+
+    print(f'[AutoCluster] 最大间距 gap={best_gap:.6f}，最优簇数={best_k}')
+    return best_k
+
+
+def run_clustering(feat_dir, uid, num_clusters, method, auto_max_clusters=20):
+    """
+    读取特征 NPY，运行聚类。
+
+    num_clusters=0  → 自动模式：由算法根据特征分布决定最优簇数
+    num_clusters>0  → 固定模式：使用指定簇数（原有行为）
+    auto_max_clusters：自动模式下的搜索上限（默认 20）
+    """
     from sklearn.cluster import AgglomerativeClustering, KMeans
+
+    auto_mode = (num_clusters == 0)
 
     feat_path_batch = os.path.join(feat_dir, f'part_feat_{uid}_0_batch.npy')
     feat_path_single = os.path.join(feat_dir, f'part_feat_{uid}_0.npy')
@@ -264,65 +307,74 @@ def run_clustering(feat_dir, uid, num_clusters, method):
     norms = np.where(norms == 0, 1, norms)
     point_feat = point_feat / norms
 
+    mode_label = f'自动（上限{auto_max_clusters}）' if auto_mode else str(num_clusters)
     print(f'[Clustering] 特征形状: {point_feat.shape}, '
-          f'方法: {method}, 目标簇数: {num_clusters}')
+          f'方法: {method}, 目标簇数: {mode_label}')
 
     if method == 'kmeans':
-        labels = KMeans(
-            n_clusters=num_clusters, random_state=0, n_init='auto'
-        ).fit(point_feat).labels_
+        if auto_mode:
+            # 轮廓系数法：对 k=2..auto_max_clusters 逐一评分，取最优
+            from sklearn.metrics import silhouette_score
+            best_k, best_score = 2, -np.inf
+            for k in range(2, auto_max_clusters + 1):
+                km = KMeans(n_clusters=k, random_state=0, n_init='auto').fit(point_feat)
+                if len(np.unique(km.labels_)) < k:
+                    continue
+                n_sub = min(5000, len(point_feat))
+                score = silhouette_score(
+                    point_feat, km.labels_,
+                    metric='cosine', sample_size=n_sub, random_state=0)
+                print(f'[AutoCluster] KMeans k={k}: 轮廓系数={score:.4f}')
+                if score > best_score:
+                    best_score = score
+                    best_k = k
+            print(f'[AutoCluster] KMeans 最优簇数: {best_k}（轮廓系数={best_score:.4f}）')
+            labels = KMeans(n_clusters=best_k, random_state=0, n_init='auto').fit(point_feat).labels_
+        else:
+            labels = KMeans(
+                n_clusters=num_clusters, random_state=0, n_init='auto'
+            ).fit(point_feat).labels_
     else:
+        # ── 凝聚聚类（Agglomerative）──────────────────────────────
         partfield_main = os.path.join(PROJECT_ROOT, 'PartField-main')
         if partfield_main not in sys.path:
             sys.path.insert(0, partfield_main)
         from run_part_clustering import (
-            construct_face_adjacency_matrix_ccmst,
+            construct_face_adjacency_matrix_facemst,
             hierarchical_clustering_labels,
         )
         from partfield.utils import load_mesh_util
 
         mesh_ply = os.path.join(feat_dir, f'input_{uid}_0.ply')
         mesh = load_mesh_util(mesh_ply)
-        adj = construct_face_adjacency_matrix_ccmst(
+        # 官方 option=1，with_knn=True：facemst 对干净/碎片化网格均适用
+        adj = construct_face_adjacency_matrix_facemst(
             mesh.faces, mesh.vertices, with_knn=True)
-        clustering = AgglomerativeClustering(
-            connectivity=adj, n_clusters=1).fit(point_feat)
+
+        if auto_mode:
+            # 带距离记录的完整树，用最大间距法确定最优 k
+            clustering = AgglomerativeClustering(
+                connectivity=adj, n_clusters=1,
+                compute_distances=True,
+            ).fit(point_feat)
+            optimal_k = find_optimal_k_from_distances(
+                clustering.distances_,
+                min_k=2, max_k=auto_max_clusters)
+            print(f'[AutoCluster] 凝聚聚类最优簇数: {optimal_k}')
+            target_k = optimal_k
+        else:
+            clustering = AgglomerativeClustering(
+                connectivity=adj, n_clusters=1,
+            ).fit(point_feat)
+            target_k = num_clusters
 
         n_samples = point_feat.shape[0]
-        children_ = clustering.children_
-        print(f'[Debug] n_samples={n_samples}, children_ 形状={children_.shape}, '
-              f'children_ 行数={len(children_)}, max_cluster={num_clusters}')
-        print(f'[Debug] children_ 中最大节点编号={children_.max()}, '
-              f'期望内部节点范围=[{n_samples}, {2*n_samples-2}]')
-
         hierarchical = hierarchical_clustering_labels(
-            children_, n_samples,
-            max_cluster=num_clusters)
-
-        print(f'[Debug] hierarchical 长度={len(hierarchical)}')
-        if hierarchical:
-            for idx, h in enumerate(hierarchical[:3]):
-                arr = np.array(h)
-                print(f'[Debug]   hierarchical[{idx}]: 唯一值数量={len(np.unique(arr))}, '
-                      f'前10个值={arr[:10].tolist()}')
-            if len(hierarchical) > 1:
-                arr_last = np.array(hierarchical[-1])
-                print(f'[Debug]   hierarchical[-1]: 唯一值数量={len(np.unique(arr_last))}')
-        else:
-            print(f'[Debug] ⚠️  hierarchical 为空！手动检查条件...')
-            current_cluster_count = n_samples
-            triggered_at = None
-            for i, (c1, c2) in enumerate(children_):
-                current_cluster_count -= 1
-                if current_cluster_count <= num_clusters:
-                    triggered_at = i
-                    break
-            print(f'[Debug]   条件 current_cluster_count <= {num_clusters} 在 i={triggered_at} 触发')
-            print(f'[Debug]   children_ 总长度={len(children_)}, '
-                  f'n_samples-1={n_samples-1}')
+            clustering.children_, n_samples,
+            max_cluster=target_k)
 
         labels = (np.array(hierarchical[0]) if hierarchical
-                  else np.zeros(len(point_feat), dtype=int))
+                  else np.zeros(n_samples, dtype=int))
 
     unique = np.unique(labels)
     remap = {old: new for new, old in enumerate(unique)}
@@ -332,8 +384,13 @@ def run_clustering(feat_dir, uid, num_clusters, method):
 
 
 def do_segment(model_id, num_clusters=10, method='agglomerative',
-               models_dir=None, n_point_per_face=None, n_sample_each=None):
-    """完整分割管线：特征提取 → 聚类 → 保存结果 → 更新 meta。"""
+               models_dir=None, n_point_per_face=None, n_sample_each=None,
+               auto_max_clusters=20):
+    """
+    完整分割管线：特征提取 → 聚类 → 保存结果 → 更新 meta。
+
+    num_clusters=0 触发自动模式，auto_max_clusters 为搜索上限。
+    """
     if models_dir is None:
         models_dir = os.path.join(PROJECT_ROOT, 'files', 'models')
 
@@ -355,7 +412,8 @@ def do_segment(model_id, num_clusters=10, method='agglomerative',
     # 2. 聚类（CPU）
     t1 = time.time()
     print(f'[Segment] {model_id}: 聚类 ...', flush=True)
-    face_labels = run_clustering(feat_dir, uid, num_clusters, method)
+    face_labels = run_clustering(feat_dir, uid, num_clusters, method,
+                                 auto_max_clusters=auto_max_clusters)
     print(f'[Segment] 聚类完成，耗时 {time.time() - t1:.1f}s', flush=True)
 
     # 3. 保存结果
@@ -462,6 +520,7 @@ class InferenceHandler(BaseHTTPRequestHandler):
             num_clusters = int(body.get('num_clusters', 10))
             method = body.get('method', 'agglomerative')
             models_dir = body.get('models_dir')
+            auto_max_clusters = int(body.get('auto_max_clusters', 20))
 
             n_point_per_face = body.get('n_point_per_face')
             n_sample_each = body.get('n_sample_each')
@@ -474,7 +533,8 @@ class InferenceHandler(BaseHTTPRequestHandler):
                 result = do_segment(
                     model_id, num_clusters, method, models_dir,
                     n_point_per_face=n_point_per_face,
-                    n_sample_each=n_sample_each)
+                    n_sample_each=n_sample_each,
+                    auto_max_clusters=auto_max_clusters)
 
             self._send_json(200, result)
 

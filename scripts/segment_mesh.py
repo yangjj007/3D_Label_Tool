@@ -116,7 +116,10 @@ def setup_gpu(gpu_arg: str):
 def parse_args():
     parser = argparse.ArgumentParser(description='PartField mesh segmentation')
     parser.add_argument('--model_id',     required=True,  help='Model ID (folder name under models_dir)')
-    parser.add_argument('--num_clusters', type=int, default=10, help='Target number of segments')
+    parser.add_argument('--num_clusters', type=int, default=10,
+                        help='分割块数，0 = 自动检测（最大间距法）')
+    parser.add_argument('--auto_max_clusters', type=int, default=20,
+                        help='自动模式下的搜索上限（默认 20）')
     parser.add_argument('--method',       default='agglomerative', choices=['agglomerative', 'kmeans'])
     parser.add_argument('--models_dir',   default=os.path.join(PROJECT_ROOT, 'files', 'models'))
     parser.add_argument('--ckpt',         default=os.path.join(PROJECT_ROOT, 'partfield-ckpt', 'model_objaverse.ckpt'),
@@ -202,12 +205,48 @@ def extract_features(mesh_path: str, uid: str, feat_dir: str, ckpt_path: str,
 # ──────────────────────────────────────────────────────────────────────────────
 # 步骤 2 — 聚类
 # ──────────────────────────────────────────────────────────────────────────────
-def run_clustering(feat_dir: str, uid: str, num_clusters: int, method: str):
+def find_optimal_k_from_distances(distances, min_k=2, max_k=20):
+    """
+    最大间距法（Dendrogram Gap）自动确定最优聚类数。
+
+    distances[i]：第 i+1 次合并时的代价（按合并顺序，从小到大）。
+    合并 k+1 → k 个簇对应的索引：distances[n_samples - k - 1]
+    """
+    n_samples = len(distances) + 1
+    hi = min(max_k, n_samples - 1)
+    lo = max(min_k, 2)
+
+    if lo >= hi:
+        return lo
+
+    best_k = lo
+    best_gap = -np.inf
+
+    for k in range(lo, hi):
+        idx_this = n_samples - k - 1   # 合并 k+1 → k 的代价索引
+        idx_next = n_samples - k - 2   # 合并 k+2 → k+1 的代价索引
+        if idx_this < 0 or idx_next < 0:
+            continue
+        gap = float(distances[idx_this]) - float(distances[idx_next])
+        if gap > best_gap:
+            best_gap = gap
+            best_k = k + 1
+
+    print(f'[AutoCluster] 最大间距 gap={best_gap:.6f}，最优簇数={best_k}')
+    return best_k
+
+
+def run_clustering(feat_dir: str, uid: str, num_clusters: int, method: str,
+                   auto_max_clusters: int = 20):
     """
     读取 feat_dir 中的特征 NPY，运行聚类，返回:
       face_labels: np.ndarray (num_faces,)  整数标签
+
+    num_clusters=0 → 自动模式（最大间距法 / 轮廓系数法）
     """
     from sklearn.cluster import AgglomerativeClustering, KMeans
+
+    auto_mode = (num_clusters == 0)
 
     # 加载特征（batch 版本优先）
     feat_path_batch  = os.path.join(feat_dir, f'part_feat_{uid}_0_batch.npy')
@@ -227,20 +266,36 @@ def run_clustering(feat_dir: str, uid: str, num_clusters: int, method: str):
     norms = np.where(norms == 0, 1, norms)
     point_feat = point_feat / norms
 
-    print(f'[Clustering] 特征形状: {point_feat.shape}, 方法: {method}, 目标簇数: {num_clusters}')
+    mode_label = f'自动（上限{auto_max_clusters}）' if auto_mode else str(num_clusters)
+    print(f'[Clustering] 特征形状: {point_feat.shape}, 方法: {method}, 目标簇数: {mode_label}')
 
     if method == 'kmeans':
-        clustering = KMeans(n_clusters=num_clusters, random_state=0, n_init='auto')
-        clustering.fit(point_feat)
-        labels = clustering.labels_
+        if auto_mode:
+            from sklearn.metrics import silhouette_score
+            best_k, best_score = 2, -np.inf
+            for k in range(2, auto_max_clusters + 1):
+                km = KMeans(n_clusters=k, random_state=0, n_init='auto').fit(point_feat)
+                if len(np.unique(km.labels_)) < k:
+                    continue
+                n_sub = min(5000, len(point_feat))
+                score = silhouette_score(
+                    point_feat, km.labels_,
+                    metric='cosine', sample_size=n_sub, random_state=0)
+                print(f'[AutoCluster] KMeans k={k}: 轮廓系数={score:.4f}')
+                if score > best_score:
+                    best_score = score
+                    best_k = k
+            print(f'[AutoCluster] KMeans 最优簇数: {best_k}（轮廓系数={best_score:.4f}）')
+            labels = KMeans(n_clusters=best_k, random_state=0, n_init='auto').fit(point_feat).labels_
+        else:
+            labels = KMeans(n_clusters=num_clusters, random_state=0, n_init='auto').fit(point_feat).labels_
     else:
         # Agglomerative — 需要面邻接矩阵
-        # 动态导入 PartField-main 中的聚类工具
         partfield_main = os.path.join(PROJECT_ROOT, 'PartField-main')
         if partfield_main not in sys.path:
             sys.path.insert(0, partfield_main)
         from run_part_clustering import (
-            construct_face_adjacency_matrix_ccmst,
+            construct_face_adjacency_matrix_facemst,
             hierarchical_clustering_labels,
         )
         from partfield.utils import load_mesh_util
@@ -248,17 +303,29 @@ def run_clustering(feat_dir: str, uid: str, num_clusters: int, method: str):
         mesh_ply = os.path.join(feat_dir, f'input_{uid}_0.ply')
         mesh = load_mesh_util(mesh_ply)
 
-        adj = construct_face_adjacency_matrix_ccmst(
+        # 官方 option=1，with_knn=True：facemst 对干净/碎片化网格均适用
+        adj = construct_face_adjacency_matrix_facemst(
             mesh.faces, mesh.vertices, with_knn=True
         )
-        clustering = AgglomerativeClustering(
-            connectivity=adj, n_clusters=1
-        ).fit(point_feat)
+
+        if auto_mode:
+            clustering = AgglomerativeClustering(
+                connectivity=adj, n_clusters=1,
+                compute_distances=True,
+            ).fit(point_feat)
+            target_k = find_optimal_k_from_distances(
+                clustering.distances_, min_k=2, max_k=auto_max_clusters)
+            print(f'[AutoCluster] 凝聚聚类最优簇数: {target_k}')
+        else:
+            clustering = AgglomerativeClustering(
+                connectivity=adj, n_clusters=1,
+            ).fit(point_feat)
+            target_k = num_clusters
+
         hierarchical = hierarchical_clustering_labels(
-            clustering.children_, point_feat.shape[0], max_cluster=num_clusters
+            clustering.children_, point_feat.shape[0], max_cluster=target_k
         )
-        # hierarchical[-1] 对应最多的簇数（max_cluster 个簇）
-        labels = np.array(hierarchical[-1]) if hierarchical else np.zeros(len(point_feat), dtype=int)
+        labels = np.array(hierarchical[0]) if hierarchical else np.zeros(len(point_feat), dtype=int)
 
     # 重新映射为 0-based 连续整数
     unique = np.unique(labels)
@@ -283,7 +350,8 @@ def main():
     meta_path = os.path.join(model_dir, 'meta.json')
 
     print(f'[PartField] 开始分割: {args.model_id}')
-    print(f'[PartField] 方法: {args.method}, 目标簇数: {args.num_clusters}')
+    mode_label = f'自动（上限{args.auto_max_clusters}）' if args.num_clusters == 0 else str(args.num_clusters)
+    print(f'[PartField] 方法: {args.method}, 目标簇数: {mode_label}')
 
     # ── 找到原始 mesh 文件 ──────────────────────────────────────────────────
     orig_file = None
@@ -313,7 +381,8 @@ def main():
 
     # ── 聚类 ─────────────────────────────────────────────────────────────────
     t1 = time.time()
-    face_labels = run_clustering(feat_dir, uid, args.num_clusters, args.method)
+    face_labels = run_clustering(feat_dir, uid, args.num_clusters, args.method,
+                                 auto_max_clusters=args.auto_max_clusters)
     print(f'[PartField] 聚类完成，耗时 {time.time()-t1:.1f}s')
 
     # ── 保存结果 ─────────────────────────────────────────────────────────────
@@ -341,7 +410,7 @@ def main():
     # 4. 保存 config.json
     config = {
         'numClusters': int(len(np.unique(face_labels))),
-        'requestedClusters': args.num_clusters,
+        'requestedClusters': args.num_clusters,  # 0 表示自动模式
         'method': args.method,
         'numFaces': int(len(face_labels)),
         'createdAt': datetime.utcnow().isoformat() + 'Z'

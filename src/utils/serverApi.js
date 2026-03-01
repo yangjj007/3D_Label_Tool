@@ -171,15 +171,15 @@ export async function batchDownloadFiles(fileIds, onProgress) {
 /**
  * 触发 PartField 分割
  * @param {string} modelId
- * @param {number} numClusters
+ * @param {number} numClusters  分割块数，0 = 自动检测
  * @param {'agglomerative'|'kmeans'} method
+ * @param {number} [autoMaxClusters]  自动模式下的搜索上限（默认 20）
  */
-export async function triggerSegmentation(modelId, numClusters = 10, method = 'agglomerative') {
+export async function triggerSegmentation(modelId, numClusters = 10, method = 'agglomerative', autoMaxClusters) {
   try {
-    const response = await axiosLongTimeout.post(`${API_BASE_URL}/models/${modelId}/segment`, {
-      numClusters,
-      method
-    });
+    const body = { numClusters, method };
+    if (autoMaxClusters != null) body.autoMaxClusters = autoMaxClusters;
+    const response = await axiosLongTimeout.post(`${API_BASE_URL}/models/${modelId}/segment`, body);
     return response.data;
   } catch (error) {
     console.error('触发分割失败:', error);
