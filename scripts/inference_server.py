@@ -282,11 +282,13 @@ def find_optimal_k_from_distances(distances, min_k=2, max_k=20):
     return best_k
 
 
-def run_clustering(feat_dir, uid, num_clusters, method, auto_max_clusters=20):
+def run_clustering(feat_dir, uid, num_clusters, method, auto_max_clusters=10, auto_method='gap'):
     """
     读取特征 NPY，运行聚类。
 
-    num_clusters=0  → 自动模式：由算法根据特征分布决定最优簇数
+    num_clusters=0  → 自动模式：由 auto_method 决定选 k 策略
+                        'gap'       = 最大间距法（仅凝聚聚类）
+                        'silhouette'= 轮廓系数法（凝聚聚类 / KMeans 均支持）
     num_clusters>0  → 固定模式：使用指定簇数（原有行为）
     auto_max_clusters：自动模式下的搜索上限（默认 20）
     """
@@ -312,7 +314,7 @@ def run_clustering(feat_dir, uid, num_clusters, method, auto_max_clusters=20):
     if method == 'hdbscan':
         mode_label = '全自动（HDBSCAN）'
     elif auto_mode:
-        mode_label = f'自动（上限{auto_max_clusters}）'
+        mode_label = f'自动-{auto_method}（上限{auto_max_clusters}）'
     else:
         mode_label = str(num_clusters)
     print(f'[Clustering] 特征形状: {point_feat.shape}, '
@@ -402,30 +404,53 @@ def run_clustering(feat_dir, uid, num_clusters, method, auto_max_clusters=20):
         adj = construct_face_adjacency_matrix_facemst(
             mesh.faces, mesh.vertices, with_knn=True)
 
+        n_samples = point_feat.shape[0]
+
         if auto_mode:
-            # 带距离记录的完整树，用最大间距法确定最优 k
+            # 带距离记录的完整树（gap 和 silhouette 均需要 children_）
             clustering = AgglomerativeClustering(
                 connectivity=adj, n_clusters=1,
                 compute_distances=True,
             ).fit(point_feat)
-            optimal_k = find_optimal_k_from_distances(
-                clustering.distances_,
-                min_k=2, max_k=auto_max_clusters)
-            print(f'[AutoCluster] 凝聚聚类最优簇数: {optimal_k}')
-            target_k = optimal_k
+
+            if auto_method == 'silhouette':
+                from sklearn.metrics import silhouette_score
+                all_levels = hierarchical_clustering_labels(
+                    clustering.children_, n_samples, max_cluster=auto_max_clusters)
+                best_labels, best_k, best_score = None, 2, -np.inf
+                for h_labels_list in all_levels:
+                    k_actual = len(np.unique(h_labels_list))
+                    if k_actual < 2:
+                        continue
+                    n_sub = min(5000, n_samples)
+                    score = silhouette_score(
+                        point_feat, h_labels_list,
+                        metric='cosine', sample_size=n_sub, random_state=0)
+                    print(f'[AutoCluster] Agglo k={k_actual}: 轮廓系数={score:.4f}')
+                    if score > best_score:
+                        best_score = score
+                        best_k = k_actual
+                        best_labels = h_labels_list
+                print(f'[AutoCluster] 凝聚聚类(轮廓系数) 最优簇数: {best_k}（score={best_score:.4f}）')
+                labels = (np.array(best_labels) if best_labels is not None
+                          else np.zeros(n_samples, dtype=int))
+            else:
+                # gap 最大间距法
+                optimal_k = find_optimal_k_from_distances(
+                    clustering.distances_, min_k=2, max_k=auto_max_clusters)
+                print(f'[AutoCluster] 凝聚聚类(间距法) 最优簇数: {optimal_k}')
+                hierarchical = hierarchical_clustering_labels(
+                    clustering.children_, n_samples, max_cluster=optimal_k)
+                labels = (np.array(hierarchical[0]) if hierarchical
+                          else np.zeros(n_samples, dtype=int))
         else:
             clustering = AgglomerativeClustering(
                 connectivity=adj, n_clusters=1,
             ).fit(point_feat)
-            target_k = num_clusters
-
-        n_samples = point_feat.shape[0]
-        hierarchical = hierarchical_clustering_labels(
-            clustering.children_, n_samples,
-            max_cluster=target_k)
-
-        labels = (np.array(hierarchical[0]) if hierarchical
-                  else np.zeros(n_samples, dtype=int))
+            hierarchical = hierarchical_clustering_labels(
+                clustering.children_, n_samples, max_cluster=num_clusters)
+            labels = (np.array(hierarchical[0]) if hierarchical
+                      else np.zeros(n_samples, dtype=int))
 
     unique = np.unique(labels)
     remap = {old: new for new, old in enumerate(unique)}
@@ -436,11 +461,11 @@ def run_clustering(feat_dir, uid, num_clusters, method, auto_max_clusters=20):
 
 def do_segment(model_id, num_clusters=10, method='agglomerative',
                models_dir=None, n_point_per_face=None, n_sample_each=None,
-               auto_max_clusters=20):
+               auto_max_clusters=20, auto_method='gap'):
     """
     完整分割管线：特征提取 → 聚类 → 保存结果 → 更新 meta。
 
-    num_clusters=0 触发自动模式，auto_max_clusters 为搜索上限。
+    num_clusters=0 触发自动模式，auto_method 决定选 k 策略（'gap' 或 'silhouette'）。
     """
     if models_dir is None:
         models_dir = os.path.join(PROJECT_ROOT, 'files', 'models')
@@ -464,7 +489,8 @@ def do_segment(model_id, num_clusters=10, method='agglomerative',
     t1 = time.time()
     print(f'[Segment] {model_id}: 聚类 ...', flush=True)
     face_labels = run_clustering(feat_dir, uid, num_clusters, method,
-                                 auto_max_clusters=auto_max_clusters)
+                                 auto_max_clusters=auto_max_clusters,
+                                 auto_method=auto_method)
     print(f'[Segment] 聚类完成，耗时 {time.time() - t1:.1f}s', flush=True)
 
     # 3. 保存结果
@@ -572,6 +598,7 @@ class InferenceHandler(BaseHTTPRequestHandler):
             method = body.get('method', 'agglomerative')
             models_dir = body.get('models_dir')
             auto_max_clusters = int(body.get('auto_max_clusters', 20))
+            auto_method = body.get('auto_method', 'gap')
 
             n_point_per_face = body.get('n_point_per_face')
             n_sample_each = body.get('n_sample_each')
@@ -585,7 +612,8 @@ class InferenceHandler(BaseHTTPRequestHandler):
                     model_id, num_clusters, method, models_dir,
                     n_point_per_face=n_point_per_face,
                     n_sample_each=n_sample_each,
-                    auto_max_clusters=auto_max_clusters)
+                    auto_max_clusters=auto_max_clusters,
+                    auto_method=auto_method)
 
             self._send_json(200, result)
 

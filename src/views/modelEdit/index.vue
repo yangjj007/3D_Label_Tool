@@ -458,7 +458,7 @@ const handleBatchDelete = async () => {
   }
 };
 
-const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys, numClusters = 0, method = 'agglomerative', useMaterialCountAsK = false }, sessionProcessedIds = new Set(), recursionDepth = 0) => {
+const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys, numClusters = 0, method = 'agglomerative', useMaterialCountAsK = false, autoMethod = 'gap' }, sessionProcessedIds = new Set(), recursionDepth = 0) => {
   const MAX_RECURSION_DEPTH = 5; // 防止因服务端状态未及时更新导致的无限递归
   // 1. 从服务器获取当前页的raw文件列表
   // 使用 unref 解包可能为 Ref 的属性
@@ -534,7 +534,7 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys, numCl
           fileListRef.value.currentPage = 1;
           await fileListRef.value.loadFileList();
         }
-        await handleBatchTagging({ concurrency, gpuConcurrency, viewKeys, numClusters, method, useMaterialCountAsK }, sessionProcessedIds, recursionDepth + 1);
+        await handleBatchTagging({ concurrency, gpuConcurrency, viewKeys, numClusters, method, useMaterialCountAsK, autoMethod }, sessionProcessedIds, recursionDepth + 1);
         return;
       } else if (recursionDepth >= MAX_RECURSION_DEPTH && totalRemaining > 0) {
         console.warn(`[批量打标] 已达最大递归深度 ${MAX_RECURSION_DEPTH}，停止继续处理，剩余 ${totalRemaining} 个文件可能需刷新后重试`);
@@ -581,7 +581,7 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys, numCl
     // 5. 后台触发下一批 raw 文件的预分割（流水线：不阻塞当前打标）
     // useMaterialCountAsK 时无法预知各模型材质数，跳过预分割；处理时按模型动态触发
     if (!useMaterialCountAsK) {
-      preSegmentNextBatch(1, pageSizeVal, numClusters, method);
+      preSegmentNextBatch(1, pageSizeVal, numClusters, method, autoMethod);
     }
 
     // 6. 更新fileStore，使用IndexedDB中的文件
@@ -640,7 +640,7 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys, numCl
         fileListRef.value.currentPage = 1;
         await fileListRef.value.loadFileList();
       }
-      await handleBatchTagging({ concurrency, gpuConcurrency, viewKeys, numClusters, method, useMaterialCountAsK }, sessionProcessedIds, recursionDepth + 1);
+      await handleBatchTagging({ concurrency, gpuConcurrency, viewKeys, numClusters, method, useMaterialCountAsK, autoMethod }, sessionProcessedIds, recursionDepth + 1);
       return;
     } else if (recursionDepth >= MAX_RECURSION_DEPTH && totalRemaining > 0) {
       console.warn(`[批量打标] 已达最大递归深度 ${MAX_RECURSION_DEPTH}，停止`);
@@ -791,7 +791,7 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys, numCl
             console.log(`[批量打标] 自动（贴图数量）：${file.name} 材质数=${materials.length}，K=${effectiveNumClusters}`);
           }
           console.log(`[批量打标] 确保分割完成，serverFileId: ${serverFileId}`);
-          await waitForSegmentation(serverFileId, effectiveNumClusters, method);
+          await waitForSegmentation(serverFileId, effectiveNumClusters, method, 600000, autoMethod);
 
           // 4. 获取分割掩码
           console.log(`[批量打标] 获取分割掩码`);
@@ -1132,7 +1132,7 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys, numCl
       await fileListRef.value.loadFileList();
     }
     // 本批次已处理完成，重置递归深度（避免误触发深度限制）
-    await handleBatchTagging({ concurrency, gpuConcurrency, viewKeys, numClusters, method, useMaterialCountAsK }, sessionProcessedIds, 0);
+    await handleBatchTagging({ concurrency, gpuConcurrency, viewKeys, numClusters, method, useMaterialCountAsK, autoMethod }, sessionProcessedIds, 0);
   } else {
     ElMessage.success('🎉 所有文件打标完成！');
     if (fileListRef.value && fileListRef.value.switchToLabeled) {
@@ -1152,7 +1152,7 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys, numCl
  * @param {number} timeoutMs  最长等待时间（默认 10 分钟）
  * @returns {Promise<void>}  resolve 表示分割完成，reject 表示超时或分割失败
  */
-const waitForSegmentation = async (modelId, numClusters = 10, method = 'agglomerative', timeoutMs = 600000) => {
+const waitForSegmentation = async (modelId, numClusters = 10, method = 'agglomerative', timeoutMs = 600000, autoMethod = 'gap') => {
   const POLL_INTERVAL = 5000;
   const deadline = Date.now() + timeoutMs;
 
@@ -1174,7 +1174,7 @@ const waitForSegmentation = async (modelId, numClusters = 10, method = 'agglomer
   if (statusData.status !== 'segmenting') {
     console.log(`[分割等待] ${modelId} 状态为 "${statusData.status}"，触发分割...`);
     try {
-      await triggerSegmentation(modelId, numClusters, method);
+      await triggerSegmentation(modelId, numClusters, method, undefined, autoMethod);
     } catch (err) {
       // 409 = 已在进行中，视为正常
       if (err?.response?.status !== 409) {
@@ -1200,7 +1200,7 @@ const waitForSegmentation = async (modelId, numClusters = 10, method = 'agglomer
   throw new Error(`模型 ${modelId} 分割超时（${timeoutMs / 60000} 分钟）`);
 };
 
-const preSegmentNextBatch = async (batchNumber, pageSize, numClusters = 10, method = 'agglomerative') => {
+const preSegmentNextBatch = async (batchNumber, pageSize, numClusters = 10, method = 'agglomerative', autoMethod = 'gap') => {
   try {
     const response = await getServerFileList('raw', batchNumber, pageSize);
     const rawFiles = response.files || [];
@@ -1208,7 +1208,7 @@ const preSegmentNextBatch = async (batchNumber, pageSize, numClusters = 10, meth
     console.log(`[流水线分割] 触发第 ${batchNumber} 页 ${rawFiles.length} 个文件的后台分割`);
     // fire-and-forget：不等待完成，让服务端后台处理
     rawFiles.forEach(file => {
-      triggerSegmentation(file.id, numClusters, method).catch(err => {
+      triggerSegmentation(file.id, numClusters, method, undefined, autoMethod).catch(err => {
         console.warn(`[流水线分割] 文件 ${file.name} 分割触发失败:`, err.message || err);
       });
     });

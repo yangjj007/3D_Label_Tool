@@ -120,6 +120,8 @@ def parse_args():
                         help='分割块数，0 = 自动检测（最大间距法）')
     parser.add_argument('--auto_max_clusters', type=int, default=20,
                         help='自动模式下的搜索上限（默认 20）')
+    parser.add_argument('--auto_method', default='gap', choices=['gap', 'silhouette'],
+                        help='自动模式下的选 k 策略：gap=最大间距法（默认），silhouette=轮廓系数法')
     parser.add_argument('--method',       default='agglomerative', choices=['agglomerative', 'kmeans'])
     parser.add_argument('--models_dir',   default=os.path.join(PROJECT_ROOT, 'files', 'models'))
     parser.add_argument('--ckpt',         default=os.path.join(PROJECT_ROOT, 'partfield-ckpt', 'model_objaverse.ckpt'),
@@ -237,12 +239,12 @@ def find_optimal_k_from_distances(distances, min_k=2, max_k=20):
 
 
 def run_clustering(feat_dir: str, uid: str, num_clusters: int, method: str,
-                   auto_max_clusters: int = 20):
+                   auto_max_clusters: int = 20, auto_method: str = 'gap'):
     """
     读取 feat_dir 中的特征 NPY，运行聚类，返回:
       face_labels: np.ndarray (num_faces,)  整数标签
 
-    num_clusters=0 → 自动模式（最大间距法 / 轮廓系数法）
+    num_clusters=0 → 自动模式（auto_method='gap'：最大间距法；'silhouette'：轮廓系数法）
     """
     from sklearn.cluster import AgglomerativeClustering, KMeans
 
@@ -269,7 +271,7 @@ def run_clustering(feat_dir: str, uid: str, num_clusters: int, method: str,
     if method == 'hdbscan':
         mode_label = '全自动（HDBSCAN）'
     elif auto_mode:
-        mode_label = f'自动（上限{auto_max_clusters}）'
+        mode_label = f'自动-{auto_method}（上限{auto_max_clusters}）'
     else:
         mode_label = str(num_clusters)
     print(f'[Clustering] 特征形状: {point_feat.shape}, 方法: {method}, 目标簇数: {mode_label}')
@@ -357,24 +359,53 @@ def run_clustering(feat_dir: str, uid: str, num_clusters: int, method: str,
             mesh.faces, mesh.vertices, with_knn=True
         )
 
+        n_samples = point_feat.shape[0]
+
         if auto_mode:
+            # 带距离记录的完整树（gap 和 silhouette 均需要 children_）
             clustering = AgglomerativeClustering(
                 connectivity=adj, n_clusters=1,
                 compute_distances=True,
             ).fit(point_feat)
-            target_k = find_optimal_k_from_distances(
-                clustering.distances_, min_k=2, max_k=auto_max_clusters)
-            print(f'[AutoCluster] 凝聚聚类最优簇数: {target_k}')
+
+            if auto_method == 'silhouette':
+                from sklearn.metrics import silhouette_score
+                all_levels = hierarchical_clustering_labels(
+                    clustering.children_, n_samples, max_cluster=auto_max_clusters)
+                best_labels, best_k, best_score = None, 2, -np.inf
+                for h_labels_list in all_levels:
+                    k_actual = len(np.unique(h_labels_list))
+                    if k_actual < 2:
+                        continue
+                    n_sub = min(5000, n_samples)
+                    score = silhouette_score(
+                        point_feat, h_labels_list,
+                        metric='cosine', sample_size=n_sub, random_state=0)
+                    print(f'[AutoCluster] Agglo k={k_actual}: 轮廓系数={score:.4f}')
+                    if score > best_score:
+                        best_score = score
+                        best_k = k_actual
+                        best_labels = h_labels_list
+                print(f'[AutoCluster] 凝聚聚类(轮廓系数) 最优簇数: {best_k}（score={best_score:.4f}）')
+                labels = (np.array(best_labels) if best_labels is not None
+                          else np.zeros(n_samples, dtype=int))
+            else:
+                # gap 最大间距法
+                target_k = find_optimal_k_from_distances(
+                    clustering.distances_, min_k=2, max_k=auto_max_clusters)
+                print(f'[AutoCluster] 凝聚聚类(间距法) 最优簇数: {target_k}')
+                hierarchical = hierarchical_clustering_labels(
+                    clustering.children_, n_samples, max_cluster=target_k)
+                labels = (np.array(hierarchical[0]) if hierarchical
+                          else np.zeros(n_samples, dtype=int))
         else:
             clustering = AgglomerativeClustering(
                 connectivity=adj, n_clusters=1,
             ).fit(point_feat)
-            target_k = num_clusters
-
-        hierarchical = hierarchical_clustering_labels(
-            clustering.children_, point_feat.shape[0], max_cluster=target_k
-        )
-        labels = np.array(hierarchical[0]) if hierarchical else np.zeros(len(point_feat), dtype=int)
+            hierarchical = hierarchical_clustering_labels(
+                clustering.children_, n_samples, max_cluster=num_clusters)
+            labels = (np.array(hierarchical[0]) if hierarchical
+                      else np.zeros(n_samples, dtype=int))
 
     # 重新映射为 0-based 连续整数
     unique = np.unique(labels)
@@ -431,7 +462,8 @@ def main():
     # ── 聚类 ─────────────────────────────────────────────────────────────────
     t1 = time.time()
     face_labels = run_clustering(feat_dir, uid, args.num_clusters, args.method,
-                                 auto_max_clusters=args.auto_max_clusters)
+                                 auto_max_clusters=args.auto_max_clusters,
+                                 auto_method=args.auto_method)
     print(f'[PartField] 聚类完成，耗时 {time.time()-t1:.1f}s')
 
     # ── 保存结果 ─────────────────────────────────────────────────────────────

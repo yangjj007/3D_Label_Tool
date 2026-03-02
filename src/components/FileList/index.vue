@@ -218,7 +218,7 @@
             <el-radio-button value="auto">
               {{ clusterMethod === 'kmeans' ? '自动（贴图数量）' : '自动（树形图间距法）' }}
             </el-radio-button>
-            <el-radio-button v-if="clusterMethod === 'kmeans'" value="silhouette">
+            <el-radio-button value="silhouette">
               自动（轮廓系数法）
             </el-radio-button>
             <el-radio-button value="manual">手动指定</el-radio-button>
@@ -232,8 +232,8 @@
           <template v-if="clusterMethod === 'hdbscan'">
             全自动密度聚类：无需指定簇数，由算法根据特征密度分布自动发现最优分区
           </template>
-          <template v-else-if="clusterMethod === 'kmeans' && clusterMode === 'silhouette'">
-            自动模式：遍历 K=2..20，计算每个 K 的轮廓系数，选择分数最高的簇数（纯特征驱动，无需贴图信息）
+          <template v-else-if="clusterMode === 'silhouette'">
+            自动模式：构建一次完整层次树后，对 K=2..20 的每个切割层评估轮廓系数，选择分数最高的簇数（纯特征驱动）
           </template>
           <template v-else-if="clusterMethod === 'kmeans' && clusterMode === 'auto'">
             自动模式：K = 每个模型的材质数（批量处理时从该模型动态获取）
@@ -417,9 +417,9 @@ const clusterMethod = ref('agglomerative');   // 'agglomerative' | 'kmeans' | 'h
 const clusterMode   = ref('auto');             // 'auto' | 'silhouette'(仅kmeans) | 'manual'
 const clusterNum    = ref(10);                 // 手动模式下的目标簇数
 
-// 切换分割方法时，若当前 clusterMode 对该方法不兼容则重置为 'auto'
+// 切换到 HDBSCAN 时，不支持 silhouette/manual，重置为 'auto'
 watch(clusterMethod, (newMethod) => {
-  if (newMethod !== 'kmeans' && clusterMode.value === 'silhouette') {
+  if (newMethod === 'hdbscan') {
     clusterMode.value = 'auto';
   }
 });
@@ -545,21 +545,23 @@ const startBatchTagging = () => {
 
   let numClusters;
   let useMaterialCountAsK = false;
+  let autoMethod = 'gap'; // 默认：最大间距法（仅凝聚聚类生效）
   if (clusterMethod.value === 'hdbscan') {
     // HDBSCAN 全自动，不需要指定簇数，后端会忽略此字段
     numClusters = 0;
   } else if (clusterMode.value === 'silhouette') {
-    // KMeans 轮廓系数法：numClusters=0 触发后端遍历轮廓系数自动选最优 K
+    // 轮廓系数法（凝聚聚类 / KMeans 均支持）：numClusters=0 + autoMethod='silhouette'
     numClusters = 0;
-    useMaterialCountAsK = false;
+    autoMethod = 'silhouette';
   } else if (clusterMode.value === 'auto') {
     if (clusterMethod.value === 'kmeans') {
       // KMeans 自动（贴图数量）：处理时从每个模型动态获取材质数作为 K
       useMaterialCountAsK = true;
       numClusters = null; // 占位，实际 K 在处理每个模型时从该模型获取
     } else {
-      // 凝聚聚类自动模式：numClusters=0 触发后端树形图间距法
+      // 凝聚聚类自动模式：numClusters=0 + autoMethod='gap' 触发后端树形图间距法
       numClusters = 0;
+      autoMethod = 'gap';
     }
   } else {
     numClusters = clusterNum.value;
@@ -573,6 +575,7 @@ const startBatchTagging = () => {
     numClusters,
     method: clusterMethod.value,
     useMaterialCountAsK,
+    autoMethod,
   });
 };
 

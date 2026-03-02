@@ -127,7 +127,7 @@ function pollInferenceHealth() {
  * 通过 HTTP 调用推理服务执行分割，返回 Promise。
  * resolve({ success, ... }) 或 reject(Error)
  */
-function callInferenceServer(modelId, numClusters, method, nPointPerFace, nSampleEach, autoMaxClusters) {
+function callInferenceServer(modelId, numClusters, method, nPointPerFace, nSampleEach, autoMaxClusters, autoMethod) {
   return new Promise((resolve, reject) => {
     const body = {
       model_id: modelId,
@@ -138,6 +138,7 @@ function callInferenceServer(modelId, numClusters, method, nPointPerFace, nSampl
     if (nPointPerFace != null)    body.n_point_per_face = nPointPerFace;
     if (nSampleEach != null)      body.n_sample_each = nSampleEach;
     if (autoMaxClusters != null)  body.auto_max_clusters = autoMaxClusters;
+    if (autoMethod != null)       body.auto_method = autoMethod;
     const postData = JSON.stringify(body);
 
     const req = http.request({
@@ -176,7 +177,7 @@ function callInferenceServer(modelId, numClusters, method, nPointPerFace, nSampl
 /**
  * Fallback：以子进程方式运行 segment_mesh.py（无预加载）
  */
-function spawnSegmentProcess(id, numClusters, method, meta, nPointPerFace, nSampleEach, autoMaxClusters) {
+function spawnSegmentProcess(id, numClusters, method, meta, nPointPerFace, nSampleEach, autoMaxClusters, autoMethod) {
   const scriptPath = path.join(PROJECT_ROOT, 'scripts', 'segment_mesh.py');
   const pythonCmd  = process.env.PYTHON_CMD || 'python';
   const gpuArg     = process.env.PARTFIELD_GPU || 'auto';
@@ -192,6 +193,7 @@ function spawnSegmentProcess(id, numClusters, method, meta, nPointPerFace, nSamp
   if (nPointPerFace != null)   args.push('--n_point_per_face', String(nPointPerFace));
   if (nSampleEach != null)     args.push('--n_sample_each', String(nSampleEach));
   if (autoMaxClusters != null) args.push('--auto_max_clusters', String(autoMaxClusters));
+  if (autoMethod != null)      args.push('--auto_method', autoMethod);
 
   const child = spawn(pythonCmd, args, { cwd: PROJECT_ROOT });
 
@@ -679,7 +681,7 @@ app.post('/api/models/:id/segment', (req, res) => {
     const {
       numClusters = 10, method = 'agglomerative',
       nPointPerFace, nSampleEach,
-      autoMaxClusters,
+      autoMaxClusters, autoMethod,
     } = req.body;
 
     const meta = readMeta(id);
@@ -695,7 +697,7 @@ app.post('/api/models/:id/segment', (req, res) => {
     console.log(`[Segment] ${id}: 使用 ${mode} 模式`);
 
     if (inferenceReady) {
-      callInferenceServer(id, numClusters, method, nPointPerFace, nSampleEach, autoMaxClusters)
+      callInferenceServer(id, numClusters, method, nPointPerFace, nSampleEach, autoMaxClusters, autoMethod)
         .then(result => {
           if (result.success) {
             const current = readMeta(id) || meta;
@@ -713,7 +715,7 @@ app.post('/api/models/:id/segment', (req, res) => {
           console.error(`❌ 推理服务调用失败: ${id}: ${err.message}`);
         });
     } else {
-      spawnSegmentProcess(id, numClusters, method, meta, nPointPerFace, nSampleEach, autoMaxClusters);
+      spawnSegmentProcess(id, numClusters, method, meta, nPointPerFace, nSampleEach, autoMaxClusters, autoMethod);
     }
 
     res.json({

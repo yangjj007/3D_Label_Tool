@@ -174,11 +174,13 @@ export async function batchDownloadFiles(fileIds, onProgress) {
  * @param {number} numClusters  分割块数，0 = 自动检测
  * @param {'agglomerative'|'kmeans'} method
  * @param {number} [autoMaxClusters]  自动模式下的搜索上限（默认 20）
+ * @param {'gap'|'silhouette'} [autoMethod]  自动选 k 策略（默认 'gap'）
  */
-export async function triggerSegmentation(modelId, numClusters = 10, method = 'agglomerative', autoMaxClusters) {
+export async function triggerSegmentation(modelId, numClusters = 10, method = 'agglomerative', autoMaxClusters, autoMethod) {
   try {
     const body = { numClusters, method };
     if (autoMaxClusters != null) body.autoMaxClusters = autoMaxClusters;
+    if (autoMethod != null)      body.autoMethod = autoMethod;
     const response = await axiosLongTimeout.post(`${API_BASE_URL}/models/${modelId}/segment`, body);
     return response.data;
   } catch (error) {
