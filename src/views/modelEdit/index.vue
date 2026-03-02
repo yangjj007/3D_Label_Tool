@@ -174,8 +174,12 @@ const handleConfigBtn = computed(() => {
 });
 
 const semanticLabelInfo = computed(() => {
+  const segmentInfo = store.activeSegmentInfo;
+  if (segmentInfo && (segmentInfo.label || segmentInfo.name)) {
+    return { show: true, text: segmentInfo.label || `分割块 ${segmentInfo.segId}` };
+  }
   const mesh = store.selectMesh;
-  if (!mesh) return { show: false, text: "" };
+  if (!mesh || !mesh.uuid) return { show: false, text: "" };
   const label =
     mesh.userData?.semanticLabel ||
     mesh.material?.userData?.label ||
@@ -1275,54 +1279,42 @@ const onResetCamera = () => {
 
 // 编辑语义标签
 const handleEditSemanticLabel = () => {
+  const segmentInfo = store.activeSegmentInfo;
   const mesh = store.selectMesh;
-  if (!mesh) {
-    ElMessage.warning('未选中材质对象');
-    return;
-  }
-  
   const model = store.modelApi?.model;
   if (!model) {
     ElMessage.warning('模型未加载');
     return;
   }
-  
-  // 获取当前文件信息
   const currentFile = fileStore.files.find(f => f.id === fileStore.selectedFileId);
   const fileInfo = {
     name: currentFile?.name || 'model.glb',
-    fileName: currentFile?.name || 'model.glb'
+    fileName: currentFile?.name || 'model.glb',
+    id: currentFile?.serverFileId || currentFile?.id,
+    isFolder: !!(currentFile?.isFromServer || currentFile?.serverFileId)
   };
-  
   const fileId = fileStore.selectedFileId;
-  
-  console.log('[编辑语义标签] 打开编辑弹窗:', {
-    meshName: mesh.name || mesh.uuid,
-    hasLabel: !!mesh.userData?.semanticLabel,
-    fileName: fileInfo.name,
-    fileId
-  });
-  
-  // 打开编辑弹窗
+  let targetMesh = mesh;
+  if (segmentInfo) {
+    targetMesh = { segId: segmentInfo.segId, label: segmentInfo.label, name: segmentInfo.name || `segment_${segmentInfo.segId}` };
+  } else if (!mesh || !mesh.uuid) {
+    ElMessage.warning('请先选中材质或分割块');
+    return;
+  }
   semanticLabelEditDialog.value?.showDialog(
-    mesh,
+    targetMesh,
     model,
     fileInfo,
     fileId,
     (updatedMesh, newLabel) => {
-      // 保存成功的回调
-      console.log('[编辑语义标签] 保存成功:', {
-        meshName: updatedMesh.name || updatedMesh.uuid,
-        newLabel: newLabel.substring(0, 50) + '...'
-      });
-      
-      // 更新文件状态标记为已打标
+      if (segmentInfo) {
+        store.setActiveSegment({ ...segmentInfo, label: newLabel });
+        editPanel.value?.updateSegmentLabel?.(segmentInfo.segId, newLabel);
+      }
       if (currentFile) {
         currentFile.hasLabels = true;
         fileStore.addOrUpdateFile(currentFile);
       }
-      
-      // 触发界面更新（Vue 的响应式会自动更新 semanticLabelInfo）
       ElMessage.success('语义标签已更新');
     }
   );

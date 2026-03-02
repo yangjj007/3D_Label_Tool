@@ -174,10 +174,15 @@ const writeAutoTags = async (...args) => {
   return await vlm.value?.writeAutoTags?.(...args);
 };
 
+const updateSegmentLabel = (segId, label) => {
+  vlm.value?.updateSegmentLabel?.(segId, label);
+};
+
 defineExpose({
   getPanelConfig,
   captureMaterialWithViews,
-  writeAutoTags
+  writeAutoTags,
+  updateSegmentLabel
 });
 </script>
 <style lang="scss" scoped>

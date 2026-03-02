@@ -6,8 +6,10 @@ export const useMeshEditStore = defineStore("useMeshEditStore", {
     modelApi: {},
     //当前材质
     selectMesh: {},
-    // 当前drag拖拽类型:oneModel:单模型  manyModel:多模型 geometry:几何体模型 tags:3d文本标签
-    modelType: "oneModel"
+    // 当前 drag 拖拽类型: oneModel:单模型 manyModel:多模型 geometry:几何体模型 tags:3d文本标签
+    modelType: "oneModel",
+    // 当前选中的分割块信息 { segId, label, name, color }，用于右上角语义标签展示
+    activeSegmentInfo: null
   }),
   getters: {
     selectMeshUuid: state => state.selectMesh.uuid
@@ -21,6 +23,9 @@ export const useMeshEditStore = defineStore("useMeshEditStore", {
     },
     setActiveEditModelType(modelType) {
       this.modelType = modelType;
+    },
+    setActiveSegment(info) {
+      this.activeSegmentInfo = info;
     }
   }
 });

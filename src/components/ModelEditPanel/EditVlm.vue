@@ -40,6 +40,45 @@
 
     <div class="section">
       <div class="header">
+        <span>分割掩码</span>
+        <el-space>
+          <el-button type="primary" size="small" :loading="loadingSegmentation" @click="loadSegmentation" :disabled="!hasModel">
+            加载分割
+          </el-button>
+          <el-button type="default" size="small" @click="clearSegmentation" :disabled="!isSegmentMode">
+            清除分割
+          </el-button>
+        </el-space>
+      </div>
+      <div class="options segment-list" v-if="segmentList.length">
+        <el-scrollbar max-height="220px">
+          <div
+            v-for="seg in segmentList"
+            :key="seg.id"
+            class="option segment-item"
+            :class="selectedSegId === seg.id ? 'option-active' : ''"
+            @click="onSelectSegment(seg)"
+          >
+            <el-space>
+              <div class="segment-color-dot" :style="{ backgroundColor: seg.color || '#888888' }"></div>
+              <div class="segment-info">
+                <div class="segment-name">{{ seg.name || `segment_${seg.id}` }}</div>
+                <div class="segment-label-preview" v-if="seg.label">{{ truncateSegmentLabel(seg.label) }}</div>
+              </div>
+              <div class="check" v-if="selectedSegId === seg.id">
+                <el-icon size="20px" color="#2a3ff6">
+                  <Check />
+                </el-icon>
+              </div>
+            </el-space>
+          </div>
+        </el-scrollbar>
+      </div>
+      <el-empty v-else description="请加载分割或先完成模型分割" :image-size="60" />
+    </div>
+
+    <div class="section">
+      <div class="header">
         <span>API 配置</span>
       </div>
       <div class="options api-row">
@@ -376,6 +415,7 @@ import { reactive, ref, computed, onMounted, getCurrentInstance, watch } from "v
 import { useMeshEditStore } from "@/store/meshEditStore";
 import { useFileStore } from "@/store/fileStore";
 import { getModelFile, saveModelFile } from "@/utils/filePersistence";
+import { getSegmentFaceLabels, getModelLabels } from "@/utils/serverApi";
 import MultiImageVLM from "@/utils/vlmService";
 import { ElMessage } from "element-plus";
 import { CAMERA_VIEW_PRESETS } from "@/utils/modelEditClass/helperModules";
@@ -510,6 +550,13 @@ const loadingPrompts = ref(false);
 const showFilterDialog = ref(false);
 const ignoreKeywords = ref(['Unknown Object']);
 
+// 分割掩码相关
+const segmentList = ref([]);
+const selectedSegId = ref(null);
+const loadingSegmentation = ref(false);
+const isSegmentMode = ref(false);
+let _segCleanup = null;
+
 // 添加关键词
 const addKeyword = () => {
   ignoreKeywords.value.push('');
@@ -612,6 +659,7 @@ const MULTI_VIEW_ORDER = ["main", "top", "side", "axial"];
 
 const materialList = computed(() => store.modelApi?.modelMaterialList || []);
 const selectedUuid = computed(() => store.selectMeshUuid);
+const hasModel = computed(() => !!store.modelApi?.model);
 
 const truncateText = (text, maxLength = 60) => {
   if (!text) return "";
@@ -629,8 +677,107 @@ const toggleMeshVisible = mesh => {
 
 const onSelectMaterial = mesh => {
   if (!mesh) return;
+  store.setActiveSegment(null);
+  selectedSegId.value = null;
+  store.modelApi?.selectSegment?.(null);
   store.selectMeshAction(mesh);
   store.modelApi?.materialModules?.onChangeModelMaterial?.(mesh.name);
+};
+
+const getModelIdForSegment = () => {
+  const fileId = fileStore.selectedFileId;
+  if (!fileId) return null;
+  const file = fileStore.files.find(f => f.id === fileId);
+  if (!file) return null;
+  return (file.serverFileId || file.id || file.name || '').replace(/\.(glb|gltf)$/i, '');
+};
+
+const loadSegmentation = async () => {
+  const modelId = getModelIdForSegment();
+  if (!modelId) {
+    ElMessage.warning('请先选择并加载一个模型文件');
+    return;
+  }
+  if (!store.modelApi?.applyFaceSegmentation) {
+    ElMessage.warning('当前模型不支持分割功能');
+    return;
+  }
+  loadingSegmentation.value = true;
+  try {
+    const faceLabels = await getSegmentFaceLabels(modelId);
+    if (!faceLabels || !faceLabels.length) {
+      ElMessage.warning('未找到分割数据，请先完成模型分割');
+      return;
+    }
+    if (_segCleanup) _segCleanup();
+    const result = store.modelApi.applyFaceSegmentation(faceLabels, segId => {
+      const seg = segmentList.value.find(s => s.id === segId);
+      selectedSegId.value = segId;
+      if (seg) {
+        store.setActiveSegment({ segId, label: seg.label, name: seg.name, color: seg.color });
+      } else {
+        store.setActiveSegment({ segId, label: '', name: `segment_${segId}`, color: '#888888' });
+      }
+      store.selectMeshAction({});
+    });
+    _segCleanup = result.cleanup;
+    isSegmentMode.value = true;
+    selectedSegId.value = null;
+    store.setActiveSegment(null);
+    const segIds = [...new Set(faceLabels)].sort((a, b) => a - b);
+    const segmentColors = result.segmentColors;
+    let labelsData = { segments: [] };
+    try {
+      const res = await getModelLabels(modelId);
+      if (res?.success && res?.data) labelsData = res.data;
+      else if (res?.segments) labelsData = { segments: res.segments };
+    } catch {
+      // 忽略标签加载失败，使用默认
+    }
+    const labelMap = new Map((labelsData.segments || []).map(s => [s.id, s]));
+    segmentList.value = segIds.map(id => {
+      const lb = labelMap.get(id) || {};
+      return {
+        id,
+        name: lb.name || `segment_${id}`,
+        label: lb.label || '',
+        color: segmentColors?.get?.(id) || lb.color || '#888888'
+      };
+    });
+    ElMessage.success(`已加载 ${segmentList.value.length} 个分割块`);
+  } catch (err) {
+    console.error('加载分割失败:', err);
+    ElMessage.error('加载分割失败：' + (err?.message || err));
+  } finally {
+    loadingSegmentation.value = false;
+  }
+};
+
+const clearSegmentation = () => {
+  if (_segCleanup) {
+    _segCleanup();
+    _segCleanup = null;
+  }
+  segmentList.value = [];
+  selectedSegId.value = null;
+  isSegmentMode.value = false;
+  store.setActiveSegment(null);
+  store.selectMeshAction({});
+  ElMessage.success('已清除分割显示');
+};
+
+const onSelectSegment = seg => {
+  if (!seg) return;
+  selectedSegId.value = seg.id;
+  store.setActiveSegment({ segId: seg.id, label: seg.label, name: seg.name, color: seg.color });
+  store.selectMeshAction({});
+  store.modelApi?.selectSegment?.(seg.id);
+};
+
+const truncateSegmentLabel = (text, maxLength = 40) => {
+  if (!text) return '';
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength)}…`;
 };
 
 const parseError = error => {
@@ -815,6 +962,13 @@ watch(
 
 watch(selectionRule, () => {
   savePromptLibrary();
+});
+
+// 切换文件时清除分割状态
+watch(() => fileStore.selectedFileId, () => {
+  if (isSegmentMode.value) {
+    clearSegmentation();
+  }
 });
 
 const onTestApi = async () => {
@@ -1437,7 +1591,12 @@ const loadPromptsFromServer = async () => {
   }
 };
 
-defineExpose({ getPanelConfig, captureMaterialWithViews, writeAutoTags });
+const updateSegmentLabel = (segId, label) => {
+  const seg = segmentList.value.find(s => s.id === segId);
+  if (seg) seg.label = label;
+};
+
+defineExpose({ getPanelConfig, captureMaterialWithViews, writeAutoTags, updateSegmentLabel });
 </script>
 
 <style scoped lang="scss">
@@ -1460,6 +1619,43 @@ defineExpose({ getPanelConfig, captureMaterialWithViews, writeAutoTags });
 }
 .material-item {
   user-select: none;
+}
+.segment-list {
+  padding: 4px 0;
+}
+.segment-item {
+  cursor: pointer;
+  padding: 6px 12px;
+  margin: 4px 0;
+  background: #1f2129;
+  border-radius: 4px;
+  user-select: none;
+}
+.segment-item .segment-color-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.segment-item .segment-info {
+  flex: 1;
+  min-width: 0;
+}
+.segment-item .segment-name {
+  font-size: 13px;
+  color: #fff;
+  font-weight: 500;
+}
+.segment-item .segment-label-preview {
+  font-size: 11px;
+  color: #8c94a7;
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.segment-item .check {
+  margin-left: 4px;
 }
 .options {
   box-sizing: border-box;
