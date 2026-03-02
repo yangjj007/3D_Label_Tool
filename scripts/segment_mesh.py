@@ -118,8 +118,8 @@ def parse_args():
     parser.add_argument('--model_id',     required=True,  help='Model ID (folder name under models_dir)')
     parser.add_argument('--num_clusters', type=int, default=10,
                         help='分割块数，0 = 自动检测（最大间距法）')
-    parser.add_argument('--auto_max_clusters', type=int, default=20,
-                        help='自动模式下的搜索上限（默认 20）')
+    parser.add_argument('--auto_max_clusters', type=int, default=10,
+                        help='自动模式下的搜索上限（默认 10）')
     parser.add_argument('--auto_method', default='gap', choices=['gap', 'silhouette'],
                         help='自动模式下的选 k 策略：gap=最大间距法（默认），silhouette=轮廓系数法')
     parser.add_argument('--method',       default='agglomerative', choices=['agglomerative', 'kmeans'])
@@ -239,7 +239,7 @@ def find_optimal_k_from_distances(distances, min_k=2, max_k=20):
 
 
 def run_clustering(feat_dir: str, uid: str, num_clusters: int, method: str,
-                   auto_max_clusters: int = 20, auto_method: str = 'gap'):
+                   auto_max_clusters: int = 10, auto_method: str = 'gap'):
     """
     读取 feat_dir 中的特征 NPY，运行聚类，返回:
       face_labels: np.ndarray (num_faces,)  整数标签

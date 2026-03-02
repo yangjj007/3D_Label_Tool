@@ -461,7 +461,7 @@ def run_clustering(feat_dir, uid, num_clusters, method, auto_max_clusters=10, au
 
 def do_segment(model_id, num_clusters=10, method='agglomerative',
                models_dir=None, n_point_per_face=None, n_sample_each=None,
-               auto_max_clusters=20, auto_method='gap'):
+               auto_max_clusters=10, auto_method='gap'):
     """
     完整分割管线：特征提取 → 聚类 → 保存结果 → 更新 meta。
 
@@ -597,7 +597,7 @@ class InferenceHandler(BaseHTTPRequestHandler):
             num_clusters = int(body.get('num_clusters', 10))
             method = body.get('method', 'agglomerative')
             models_dir = body.get('models_dir')
-            auto_max_clusters = int(body.get('auto_max_clusters', 20))
+            auto_max_clusters = int(body.get('auto_max_clusters', 10))
             auto_method = body.get('auto_method', 'gap')
 
             n_point_per_face = body.get('n_point_per_face')
