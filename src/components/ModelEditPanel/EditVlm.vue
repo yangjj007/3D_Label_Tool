@@ -688,8 +688,8 @@ const getModelIdForSegment = () => {
   const fileId = fileStore.selectedFileId;
   if (!fileId) return null;
   const file = fileStore.files.find(f => f.id === fileId);
-  if (!file) return null;
-  return (file.serverFileId || file.id || file.name || '').replace(/\.(glb|gltf)$/i, '');
+  const raw = file?.serverFileId || file?.id || fileId;
+  return raw.replace(/\.(glb|gltf)$/i, '');
 };
 
 const loadSegmentation = async () => {
