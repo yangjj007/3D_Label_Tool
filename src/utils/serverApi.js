@@ -281,6 +281,26 @@ export async function getModelLabels(modelId) {
   }
 }
 
+/**
+ * 读取某个分割块的已保存截图
+ * @param {string} modelId
+ * @param {number|string} segId
+ * @param {string} viewKey
+ * @returns {Promise<Blob>}
+ */
+export async function getSegmentLabelImage(modelId, segId, viewKey) {
+  try {
+    const response = await axiosWithTimeout.get(
+      `${API_BASE_URL}/models/${encodeURIComponent(modelId)}/labels/images/segments/${encodeURIComponent(segId)}/${encodeURIComponent(viewKey)}`,
+      { responseType: 'blob' }
+    );
+    return response.data;
+  } catch (error) {
+    console.error('读取分割块截图失败:', error);
+    throw error;
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 过滤 & 元数据
 // ─────────────────────────────────────────────────────────────────────────────

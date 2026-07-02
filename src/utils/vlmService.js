@@ -1,11 +1,17 @@
 import axios from 'axios';
+import {
+  DEFAULT_VLM_BASE_URL,
+  DEFAULT_VLM_MODEL_NAME,
+  getVlmChatCompletionsUrl,
+  normalizeVlmBaseUrl
+} from '@/config/vlm';
 
 // 多图像视觉语言模型客户端
 class MultiImageVLM {
   constructor(config = {}) {
-    this.apiKey = config.apiKey || '';
-    this.baseUrl = this._normalizeBaseUrl(config.baseUrl?.trim() || 'https://aihubmix.com');
-    this.modelName = config.modelName || 'gpt-4o';
+    this.apiKey = this._normalizeApiKey(config.apiKey || '');
+    this.baseUrl = this._normalizeBaseUrl(config.baseUrl?.trim() || DEFAULT_VLM_BASE_URL);
+    this.modelName = config.modelName || DEFAULT_VLM_MODEL_NAME;
     this.temperature = config.temperature || 0.3;
     this.maxRetries = config.maxRetries || 3;
     this.retryDelay = config.retryDelay || 2000; // 毫秒
@@ -16,27 +22,22 @@ class MultiImageVLM {
   }
 
   _normalizeBaseUrl(url) {
-    if (!url) return url;
-    url = url.replace(/\/+$/, '');
-    if (url.endsWith('/v1')) {
-      url = url.slice(0, -3);
-    }
-    return url;
+    return normalizeVlmBaseUrl(url);
+  }
+
+  _normalizeApiKey(apiKey) {
+    return String(apiKey || '').trim().replace(/^Bearer\s+/i, '');
   }
 
   // 获取代理URL
   _getProxyUrl() {
-    // 检查是否是localhost的baseUrl，如果是则使用代理
-    if (this.baseUrl && this.baseUrl.includes('localhost')) {
-      const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ;
-      return apiBaseUrl.replace(/\/api$/, '') + '/api/vlm-proxy';
-    }
-    return null;
+    const apiBaseUrl = import.meta.env.VITE_API_BASE_URL;
+    return apiBaseUrl ? apiBaseUrl.replace(/\/api$/, '') + '/api/vlm-proxy' : null;
   }
 
   // 初始化配置
   init(config) {
-    if (config.apiKey) this.apiKey = config.apiKey;
+    if (config.apiKey) this.apiKey = this._normalizeApiKey(config.apiKey);
     if (config.baseUrl) {
       this.baseUrl = this._normalizeBaseUrl(config.baseUrl.trim());
       this.proxyUrl = this._getProxyUrl();
@@ -107,9 +108,12 @@ class MultiImageVLM {
     imageInputs,
     options = {}
   ) {
-    if (!this.apiKey) {
+    const apiKey = this._normalizeApiKey(this.apiKey);
+    if (!apiKey) {
       throw new Error('未配置API Key');
     }
+
+    this.apiKey = apiKey;
 
     const temperature = options.temperature || this.temperature;
     const maxTokens = options.maxTokens || 4096;
@@ -198,14 +202,14 @@ class MultiImageVLM {
         let response;
 
         // 判断是否使用代理
-        const shouldUseProxy = this.useProxy && this.proxyUrl && this.baseUrl.includes('localhost');
+        const shouldUseProxy = this.useProxy && this.proxyUrl;
 
         if (shouldUseProxy) {
           // 通过代理调用
           console.log(`[VLM] 使用代理: ${this.proxyUrl}`);
           response = await axios.post(this.proxyUrl, {
             baseUrl: this.baseUrl,
-            apiKey: this.apiKey,
+            apiKey,
             requestBody,
             headers: customHeaders
           }, {
@@ -214,12 +218,12 @@ class MultiImageVLM {
         } else {
           // 直接调用
           const headers = {
-            'Authorization': `Bearer ${this.apiKey}`,
+            'Authorization': `Bearer ${apiKey}`,
             'Content-Type': 'application/json',
             ...customHeaders
           };
 
-          response = await axios.post(`${this.baseUrl}/v1/chat/completions`, requestBody, { headers });
+          response = await axios.post(getVlmChatCompletionsUrl(this.baseUrl), requestBody, { headers });
         }
 
         return this._parseResponse(response.data);
@@ -234,6 +238,19 @@ class MultiImageVLM {
         const delay = this.retryDelay * Math.pow(2, retries - 1) + Math.random() * 500;
         await new Promise(resolve => setTimeout(resolve, delay));
       }
+    }
+
+    const responseData = lastError?.response?.data;
+    const responseStatus = lastError?.response?.status;
+    if (responseData || responseStatus) {
+      const upstreamMessage = responseData?.error?.message || responseData?.message || responseData?.error;
+      return {
+        error: `调用失败${responseStatus ? ` (${responseStatus})` : ''}: ${upstreamMessage || lastError.message || 'unknown error'}`,
+        text: '',
+        usage: {},
+        status: responseStatus,
+        raw: responseData
+      };
     }
 
     return {

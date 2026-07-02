@@ -178,11 +178,16 @@ const updateSegmentLabel = (segId, label) => {
   vlm.value?.updateSegmentLabel?.(segId, label);
 };
 
+const updateSegmentReview = (segId, review) => {
+  vlm.value?.updateSegmentReview?.(segId, review);
+};
+
 defineExpose({
   getPanelConfig,
   captureMaterialWithViews,
   writeAutoTags,
-  updateSegmentLabel
+  updateSegmentLabel,
+  updateSegmentReview
 });
 </script>
 <style lang="scss" scoped>

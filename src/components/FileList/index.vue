@@ -40,6 +40,14 @@
           >
             批量打标({{ totalFiles }})
           </el-button>
+          <el-button
+            size="small"
+            type="success"
+            @click="triggerBatchReview"
+            :disabled="fileType !== 'labeled' || totalFiles === 0 || isBatchProcessing"
+          >
+            批量审查({{ totalFiles }})
+          </el-button>
           <el-button 
             size="small"
             type="success" 
@@ -395,7 +403,7 @@ const props = defineProps({
   }
 });
 
-const emit = defineEmits(["select", "delete", "batch-upload", "batch-tag", "refresh"]);
+const emit = defineEmits(["select", "delete", "batch-upload", "batch-tag", "batch-review", "refresh"]);
 
 // 分页相关状态
 const fileType = ref('raw');
@@ -642,6 +650,7 @@ const truncateFileName = (name, frontChars = 4, backChars = 8) => {
 
 // 事件触发
 const triggerBatchUpload = () => emit("batch-upload");
+const triggerBatchReview = () => emit("batch-review");
 const emitDeleteFile = async (file) => {
   emit("delete", file);
   // 删除后刷新列表

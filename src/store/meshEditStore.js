@@ -8,7 +8,7 @@ export const useMeshEditStore = defineStore("useMeshEditStore", {
     selectMesh: {},
     // 当前 drag 拖拽类型: oneModel:单模型 manyModel:多模型 geometry:几何体模型 tags:3d文本标签
     modelType: "oneModel",
-    // 当前选中的分割块信息 { segId, label, name, color }，用于右上角语义标签展示
+    // 当前选中的分割块信息 { segId, label, name, color, review }，用于右上角语义标签展示
     activeSegmentInfo: null
   }),
   getters: {

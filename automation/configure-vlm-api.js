@@ -19,6 +19,8 @@ const http = require('http');
 const readline = require('readline');
 
 const CONFIG_FILE = path.join(__dirname, '../vlm-config.json');
+const DEFAULT_VLM_API_URL = 'https://api.siliconflow.cn/v1';
+const DEFAULT_VLM_MODEL = 'Qwen/Qwen3-VL-8B-Instruct';
 
 // 颜色代码
 const colors = {
@@ -217,16 +219,16 @@ async function interactiveInput() {
   console.log('\n请输入VLM API配置:\n');
 
   const baseUrl = await question(
-    `${colors.cyan}API地址 [${existingConfig?.baseUrl || 'https://api.openai.com/v1'}]: ${colors.reset}`
-  ) || existingConfig?.baseUrl || 'https://api.openai.com/v1';
+    `${colors.cyan}API地址 [${existingConfig?.baseUrl || DEFAULT_VLM_API_URL}]: ${colors.reset}`
+  ) || existingConfig?.baseUrl || DEFAULT_VLM_API_URL;
 
   const apiKey = await question(
     `${colors.cyan}API Key [${existingConfig?.apiKey ? '已保存' : ''}]: ${colors.reset}`
   ) || existingConfig?.apiKey || '';
 
   const modelName = await question(
-    `${colors.cyan}模型名称 [${existingConfig?.modelName || 'gpt-4-vision-preview'}]: ${colors.reset}`
-  ) || existingConfig?.modelName || 'gpt-4-vision-preview';
+    `${colors.cyan}模型名称 [${existingConfig?.modelName || DEFAULT_VLM_MODEL}]: ${colors.reset}`
+  ) || existingConfig?.modelName || DEFAULT_VLM_MODEL;
 
   rl.close();
 
@@ -251,7 +253,7 @@ async function main() {
     config = {
       baseUrl: process.env.VLM_API_URL,
       apiKey: process.env.VLM_API_KEY,
-      modelName: process.env.VLM_MODEL || 'gpt-4-vision-preview'
+      modelName: process.env.VLM_MODEL || DEFAULT_VLM_MODEL
     };
   } else {
     // 交互式输入

@@ -64,6 +64,14 @@
               <div class="segment-info">
                 <div class="segment-name">{{ seg.name || `segment_${seg.id}` }}</div>
                 <div class="segment-label-preview" v-if="seg.label">{{ truncateSegmentLabel(seg.label) }}</div>
+                <div class="segment-review-preview" v-if="seg.review">
+                  <el-tag size="small" :type="getReviewTagType(seg.review)">
+                    {{ getReviewStatusText(seg.review) }}
+                  </el-tag>
+                  <span v-if="seg.review.score != null" class="segment-review-score">
+                    {{ seg.review.score }}分
+                  </span>
+                </div>
               </div>
               <div class="check" v-if="selectedSegId === seg.id">
                 <el-icon size="20px" color="#2a3ff6">
@@ -417,6 +425,7 @@ import { useFileStore } from "@/store/fileStore";
 import { getModelFile, saveModelFile } from "@/utils/filePersistence";
 import { getSegmentFaceLabels, getModelLabels } from "@/utils/serverApi";
 import MultiImageVLM from "@/utils/vlmService";
+import { DEFAULT_VLM_BASE_URL, DEFAULT_VLM_MODEL_NAME } from "@/config/vlm";
 import { ElMessage } from "element-plus";
 import { CAMERA_VIEW_PRESETS } from "@/utils/modelEditClass/helperModules";
 
@@ -434,22 +443,25 @@ const fileStore = useFileStore();
 const vlmClient = new MultiImageVLM();
 
 const apiConfig = reactive({
-  baseUrl: "https://aihubmix.com",
+  baseUrl: DEFAULT_VLM_BASE_URL,
   apiKey: "",
-  modelName: ""
+  modelName: DEFAULT_VLM_MODEL_NAME
 });
 const CONFIG_STORAGE_KEY = "vlm-api-config";
 const PROMPT_STORAGE_KEY = "vlm-prompt-library";
-const DEFAULT_MODEL_NAME = "qwen3-vl-235b-a22b-instruct";
+const DEFAULT_MODEL_NAME = DEFAULT_VLM_MODEL_NAME;
 const { proxy } = getCurrentInstance();
 const $local = proxy.$local;
 
+const normalizeApiKey = key => String(key || '').trim().replace(/^Bearer\s+/i, '');
+
 const saveApiToStorage = () => {
   const payload = {
-    baseUrl: apiConfig.baseUrl,
-    apiKey: apiConfig.apiKey,
+    baseUrl: apiConfig.baseUrl?.trim(),
+    apiKey: normalizeApiKey(apiConfig.apiKey),
     modelName: apiConfig.modelName
   };
+  apiConfig.apiKey = payload.apiKey;
   $local.set(CONFIG_STORAGE_KEY, payload);
 };
 
@@ -714,9 +726,9 @@ const loadSegmentation = async () => {
       const seg = segmentList.value.find(s => s.id === segId);
       selectedSegId.value = segId;
       if (seg) {
-        store.setActiveSegment({ segId, label: seg.label, name: seg.name, color: seg.color });
+        store.setActiveSegment({ segId, label: seg.label, name: seg.name, color: seg.color, review: seg.review });
       } else {
-        store.setActiveSegment({ segId, label: '', name: `segment_${segId}`, color: '#888888' });
+        store.setActiveSegment({ segId, label: '', name: `segment_${segId}`, color: '#888888', review: null });
       }
       store.selectMeshAction({});
     });
@@ -741,6 +753,7 @@ const loadSegmentation = async () => {
         id,
         name: lb.name || `segment_${id}`,
         label: lb.label || '',
+        review: lb.review || null,
         color: segmentColors?.get?.(id) || lb.color || '#888888'
       };
     });
@@ -769,9 +782,29 @@ const clearSegmentation = () => {
 const onSelectSegment = seg => {
   if (!seg) return;
   selectedSegId.value = seg.id;
-  store.setActiveSegment({ segId: seg.id, label: seg.label, name: seg.name, color: seg.color });
+  store.setActiveSegment({ segId: seg.id, label: seg.label, name: seg.name, color: seg.color, review: seg.review });
   store.selectMeshAction({});
   store.modelApi?.selectSegment?.(seg.id);
+};
+
+const getReviewStatusText = review => {
+  const status = review?.status || review?.decision;
+  const map = {
+    pass: '审查通过',
+    needs_review: '需复核',
+    fail: '未通过',
+    error: '审查失败',
+    skipped: '未审查'
+  };
+  return map[status] || '已审查';
+};
+
+const getReviewTagType = review => {
+  const status = review?.status || review?.decision;
+  if (status === 'pass') return 'success';
+  if (status === 'fail' || status === 'error') return 'danger';
+  if (status === 'needs_review') return 'warning';
+  return 'info';
 };
 
 const truncateSegmentLabel = (text, maxLength = 40) => {
@@ -808,8 +841,8 @@ const saveApiConfig = () => {
 
 const buildClient = () => {
   vlmClient.init({
-    baseUrl: apiConfig.baseUrl,
-    apiKey: apiConfig.apiKey,
+    baseUrl: apiConfig.baseUrl?.trim(),
+    apiKey: normalizeApiKey(apiConfig.apiKey),
     modelName: apiConfig.modelName || DEFAULT_MODEL_NAME
   });
   return vlmClient;
@@ -916,9 +949,14 @@ const removeCapture = id => {
 
 const loadSavedConfig = () => {
   const stored = $local.get(CONFIG_STORAGE_KEY);
-  if (stored?.baseUrl) apiConfig.baseUrl = stored.baseUrl;
-  if (stored?.apiKey) apiConfig.apiKey = stored.apiKey;
-  apiConfig.modelName = stored?.modelName || DEFAULT_MODEL_NAME;
+  const hasLegacyBaseUrl = stored?.baseUrl?.includes("aihubmix.com");
+  if (stored?.baseUrl && !stored.baseUrl.includes("aihubmix.com")) {
+    apiConfig.baseUrl = stored.baseUrl;
+  } else {
+    apiConfig.baseUrl = DEFAULT_VLM_BASE_URL;
+  }
+  if (stored?.apiKey) apiConfig.apiKey = normalizeApiKey(stored.apiKey);
+  apiConfig.modelName = hasLegacyBaseUrl ? DEFAULT_MODEL_NAME : (stored?.modelName || DEFAULT_MODEL_NAME);
 };
 
 onMounted(async () => {
@@ -989,6 +1027,7 @@ const onTestApi = async () => {
     } else {
       testMessage.value = formatTestMessage(result.text || "接口响应成功但未返回文本");
       testState.value = "success";
+      saveApiToStorage();
       ElMessage.success("API测试成功");
     }
   } catch (error) {
@@ -1199,7 +1238,11 @@ const onBatchSendPrompt = async () => {
 };
 
 const getPanelConfig = () => ({
-  apiConfig: { ...apiConfig },
+  apiConfig: {
+    baseUrl: apiConfig.baseUrl?.trim(),
+    apiKey: normalizeApiKey(apiConfig.apiKey),
+    modelName: apiConfig.modelName || DEFAULT_MODEL_NAME
+  },
   promptList: promptList.value,
   selectionRule: selectionRule.value,
   conversationText: conversationText.value,
@@ -1593,10 +1636,25 @@ const loadPromptsFromServer = async () => {
 
 const updateSegmentLabel = (segId, label) => {
   const seg = segmentList.value.find(s => s.id === segId);
-  if (seg) seg.label = label;
+  if (seg) {
+    seg.label = label;
+    if (selectedSegId.value === segId) {
+      store.setActiveSegment({ segId: seg.id, label: seg.label, name: seg.name, color: seg.color, review: seg.review });
+    }
+  }
 };
 
-defineExpose({ getPanelConfig, captureMaterialWithViews, writeAutoTags, updateSegmentLabel });
+const updateSegmentReview = (segId, review) => {
+  const seg = segmentList.value.find(s => s.id === segId);
+  if (seg) {
+    seg.review = review;
+    if (selectedSegId.value === segId) {
+      store.setActiveSegment({ segId: seg.id, label: seg.label, name: seg.name, color: seg.color, review: seg.review });
+    }
+  }
+};
+
+defineExpose({ getPanelConfig, captureMaterialWithViews, writeAutoTags, updateSegmentLabel, updateSegmentReview });
 </script>
 
 <style scoped lang="scss">
@@ -1653,6 +1711,16 @@ defineExpose({ getPanelConfig, captureMaterialWithViews, writeAutoTags, updateSe
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.segment-item .segment-review-preview {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+.segment-review-score {
+  font-size: 11px;
+  color: #a8b1c7;
 }
 .segment-item .check {
   margin-left: 4px;
@@ -1949,5 +2017,3 @@ defineExpose({ getPanelConfig, captureMaterialWithViews, writeAutoTags, updateSe
   font-weight: 600;
 }
 </style>
-
-

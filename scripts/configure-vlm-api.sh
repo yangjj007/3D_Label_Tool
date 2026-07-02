@@ -15,7 +15,7 @@
 # 环境变量方式（非交互）：
 #   VLM_API_URL=http://your-api.com \
 #   VLM_API_KEY=your-key \
-#   VLM_MODEL=gpt-4-vision-preview \
+#   VLM_MODEL=Qwen/Qwen3-VL-8B-Instruct \
 #   bash configure-vlm-api.sh --auto
 #############################################
 
@@ -32,6 +32,8 @@ PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$PROJECT_DIR"
 
 CONFIG_FILE="$PROJECT_DIR/vlm-config.json"
+DEFAULT_VLM_API_URL="https://api.siliconflow.cn/v1"
+DEFAULT_VLM_MODEL="Qwen/Qwen3-VL-8B-Instruct"
 
 # 日志函数
 log_header() {
@@ -105,9 +107,9 @@ if [ "$AUTO_MODE" = true ]; then
         log_error "自动模式需要设置环境变量: VLM_API_URL, VLM_API_KEY"
         echo ""
         echo "示例："
-        echo "  VLM_API_URL=https://api.openai.com/v1 \\"
+        echo "  VLM_API_URL=$DEFAULT_VLM_API_URL \\"
         echo "  VLM_API_KEY=sk-xxxxx \\"
-        echo "  VLM_MODEL=gpt-4-vision-preview \\"
+        echo "  VLM_MODEL=$DEFAULT_VLM_MODEL \\"
         echo "  bash configure-vlm-api.sh --auto"
         exit 1
     fi
@@ -117,16 +119,16 @@ else
     echo ""
     
     # API地址
-    read -p "$(echo -e ${CYAN}API地址 [${EXISTING_API_URL:-https://api.openai.com/v1}]: ${NC})" API_URL
-    API_URL=${API_URL:-${EXISTING_API_URL:-https://api.openai.com/v1}}
+    read -p "$(echo -e ${CYAN}API地址 [${EXISTING_API_URL:-$DEFAULT_VLM_API_URL}]: ${NC})" API_URL
+    API_URL=${API_URL:-${EXISTING_API_URL:-$DEFAULT_VLM_API_URL}}
     
     # API Key
     read -p "$(echo -e ${CYAN}API Key [${EXISTING_API_KEY:+已保存}]: ${NC})" API_KEY
     API_KEY=${API_KEY:-$EXISTING_API_KEY}
     
     # 模型名称
-    read -p "$(echo -e ${CYAN}模型名称 [${EXISTING_MODEL:-gpt-4-vision-preview}]: ${NC})" MODEL_NAME
-    MODEL_NAME=${MODEL_NAME:-${EXISTING_MODEL:-gpt-4-vision-preview}}
+    read -p "$(echo -e ${CYAN}模型名称 [${EXISTING_MODEL:-$DEFAULT_VLM_MODEL}]: ${NC})" MODEL_NAME
+    MODEL_NAME=${MODEL_NAME:-${EXISTING_MODEL:-$DEFAULT_VLM_MODEL}}
 fi
 
 # 验证配置
@@ -370,4 +372,3 @@ else
     echo ""
     exit 1
 fi
-

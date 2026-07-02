@@ -64,6 +64,7 @@
               @batch-download="handleBatchDownload"
               @batch-delete="handleBatchDelete"
               @batch-tag="handleBatchTagging"
+              @batch-review="handleBatchReview"
             />
           </div>
           <div v-show="activeLeftTab === 'modelChoose'" class="panel-content">
@@ -88,6 +89,20 @@
             </el-icon>
           </div>
           <div class="semantic-label-value">{{ semanticLabelInfo.text }}</div>
+          <div v-if="semanticLabelInfo.review" class="semantic-review-block">
+            <div class="semantic-review-header">
+              <span>审查结果</span>
+              <el-tag size="small" :type="getReviewStatusType(semanticLabelInfo.review)">
+                {{ getReviewStatusText(semanticLabelInfo.review) }}
+              </el-tag>
+            </div>
+            <div class="semantic-review-score" v-if="semanticLabelInfo.review.score != null">
+              置信分：{{ semanticLabelInfo.review.score }}
+            </div>
+            <div class="semantic-review-reason">
+              {{ semanticLabelInfo.review.reason || semanticLabelInfo.review.rawText || '暂无审查说明' }}
+            </div>
+          </div>
         </div>
         <div id="mesh-txt"></div>
       </div>
@@ -129,6 +144,8 @@ import {
   deleteServerFile,
   saveLabeledFolder,
   saveModelLabels,
+  getModelLabels,
+  getSegmentLabelImage,
   triggerSegmentation,
   getSegmentFaceLabels,
   getSegmentStatus,
@@ -137,6 +154,7 @@ import {
 import * as THREE from "three";
 
 import MultiImageVLM from "@/utils/vlmService";
+import { DEFAULT_VLM_MODEL_NAME } from "@/config/vlm";
 import RenderPool from "@/utils/RenderPool";
 import OffscreenRenderModel from "@/utils/OffscreenRenderModel";
 
@@ -164,6 +182,8 @@ const processedCount = ref(0);
 const totalCount = ref(0);
 const batchStartTime = ref(0);
 const remainingTime = ref("");
+const REVIEW_VERSION = "local-rule-review-v1";
+const VLM_REVIEW_VERSION = "vlm-review-v1";
 
 const handleConfigBtn = computed(() => {
   if (editPanel.value) {
@@ -175,18 +195,42 @@ const handleConfigBtn = computed(() => {
 
 const semanticLabelInfo = computed(() => {
   const segmentInfo = store.activeSegmentInfo;
-  if (segmentInfo && (segmentInfo.label || segmentInfo.name)) {
-    return { show: true, text: segmentInfo.label || `分割块 ${segmentInfo.segId}` };
+  if (segmentInfo && (segmentInfo.label || segmentInfo.name || segmentInfo.review)) {
+    return {
+      show: true,
+      text: segmentInfo.label || `分割块 ${segmentInfo.segId}`,
+      review: segmentInfo.review || null
+    };
   }
   const mesh = store.selectMesh;
-  if (!mesh || !mesh.uuid) return { show: false, text: "" };
+  if (!mesh || !mesh.uuid) return { show: false, text: "", review: null };
   const label =
     mesh.userData?.semanticLabel ||
     mesh.material?.userData?.label ||
     store.modelApi?.semanticLabels?.[mesh.uuid];
-  if (!label) return { show: false, text: "" };
-  return { show: true, text: label };
+  if (!label) return { show: false, text: "", review: null };
+  return { show: true, text: label, review: null };
 });
+
+const getReviewStatusText = review => {
+  const status = review?.status || review?.decision;
+  const map = {
+    pass: "审查通过",
+    needs_review: "需人工复核",
+    fail: "未通过",
+    error: "审查失败",
+    skipped: "未审查"
+  };
+  return map[status] || "已审查";
+};
+
+const getReviewStatusType = review => {
+  const status = review?.status || review?.decision;
+  if (status === "pass") return "success";
+  if (status === "fail" || status === "error") return "danger";
+  if (status === "needs_review") return "warning";
+  return "info";
+};
 
 const loadPersistedModelFile = async (file, silent = false) => {
   console.log(`[loadPersistedModelFile] 尝试加载文件:`, { id: file.id, name: file.name, silent, hasLabels: file.hasLabels, isFromServer: file.isFromServer });
@@ -690,7 +734,7 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys, numCl
   console.log(`[批量打标] 截图视角: ${viewKeys.join(', ')}`);
   console.log(`[批量打标] API配置:`, {
     baseUrl: vlmConfig.apiConfig.baseUrl,
-    modelName: vlmConfig.apiConfig.modelName || "qwen3-vl-235b-a22b-instruct"
+    modelName: vlmConfig.apiConfig.modelName || DEFAULT_VLM_MODEL_NAME
   });
   console.log(`[批量打标] editPanel 存在:`, !!editPanel.value);
   console.log(`[批量打标] captureMaterialWithViews 存在:`, !!editPanel.value?.captureMaterialWithViews);
@@ -701,7 +745,7 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys, numCl
   vlmClient.init({
     baseUrl: vlmConfig.apiConfig.baseUrl,
     apiKey: vlmConfig.apiConfig.apiKey,
-    modelName: vlmConfig.apiConfig.modelName || "qwen3-vl-235b-a22b-instruct"
+    modelName: vlmConfig.apiConfig.modelName || DEFAULT_VLM_MODEL_NAME
   });
 
   // 设置 GPU 并发数（全局配置）
@@ -1147,6 +1191,304 @@ const handleBatchTagging = async ({ concurrency, gpuConcurrency, viewKeys, numCl
   await loadPersistedFiles();
 };
 
+const buildLocalLabelReview = segment => {
+  const label = String(segment?.label || "").trim();
+  const issues = [];
+  let score = 90;
+
+  if (!label) {
+    return {
+      status: "fail",
+      score: 0,
+      reason: "标签为空，无法作为有效训练样本",
+      issues: ["missing_label"],
+      suggestedLabel: "",
+      reviewedAt: new Date().toISOString(),
+      reviewerModel: "local-rules",
+      promptVersion: REVIEW_VERSION
+    };
+  }
+
+  if (/unknown object|unknown|无法识别|不确定|n\/a/i.test(label)) {
+    issues.push("invalid_or_unknown_label");
+    score -= 45;
+  }
+  if (label.length < 16) {
+    issues.push("label_too_short");
+    score -= 20;
+  }
+  if (/screenshot|highlight|yellow border|高亮|截图|背景|ui|界面/i.test(label)) {
+    issues.push("mentions_rendering_or_ui_context");
+    score -= 20;
+  }
+  if (/\b\d+(\.\d+)?\s*(n|newton|mm|cm|°|degree|degrees)\b/i.test(label)) {
+    issues.push("contains_numeric_physical_claim_needs_visual_check");
+    score -= 10;
+  }
+
+  const status = score >= 75 && issues.length === 0
+    ? "pass"
+    : (score < 45 ? "fail" : "needs_review");
+
+  return {
+    status,
+    score: Math.max(0, Math.min(100, score)),
+    reason: issues.length
+      ? `本地规则发现 ${issues.length} 个风险点：${issues.join(", ")}`
+      : "本地规则未发现明显异常，建议抽样人工复核",
+    issues,
+    suggestedLabel: "",
+    reviewedAt: new Date().toISOString(),
+    reviewerModel: "local-rules",
+    promptVersion: REVIEW_VERSION
+  };
+};
+
+const getVlmReviewConfig = () => {
+  const apiConfig = editPanel.value?.getPanelConfig?.()?.vlm?.apiConfig || {};
+  if (!apiConfig.baseUrl || !apiConfig.apiKey) {
+    return null;
+  }
+  return {
+    baseUrl: apiConfig.baseUrl,
+    apiKey: apiConfig.apiKey,
+    modelName: apiConfig.modelName || DEFAULT_VLM_MODEL_NAME
+  };
+};
+
+const buildVlmReviewPrompt = (segment, modelName) => `
+You are a strict QA reviewer for 3D multimodal labeling data.
+You will receive rendered images of one selected 3D segment and the generated text label for that exact segment.
+Review only whether the label is supported by the visible selected segment evidence.
+
+Check:
+1. The label identifies the same component or feature.
+2. Material, color, texture, interaction and function claims are visually supported.
+3. The label does not describe unrelated surroundings, UI, screenshots, or yellow borders.
+4. Numeric force, travel, angle, brand, material grade, or internal mechanism claims are not invented when not observable.
+
+Return JSON only:
+{
+  "status": "pass" | "needs_review" | "fail",
+  "score": 0-100,
+  "reason": "short Chinese explanation",
+  "issues": ["short issue strings"],
+  "suggested_label": "optional corrected label or empty string"
+}
+
+Model: ${modelName || "unknown"}
+Segment: ${segment.name || `segment_${segment.id}`}
+Generated label:
+${segment.label || ""}
+`.trim();
+
+const parseVlmReviewJson = text => {
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    const match = text.match(/\{[\s\S]*\}/);
+    if (!match) return null;
+    try {
+      return JSON.parse(match[0]);
+    } catch {
+      return null;
+    }
+  }
+};
+
+const normalizeVlmReview = (result, reviewerModel, viewKeys) => {
+  const parsed = parseVlmReviewJson(result?.text || "");
+  const scoreValue = Number(parsed?.score);
+  const status = ["pass", "needs_review", "fail"].includes(parsed?.status)
+    ? parsed.status
+    : (result?.error ? "error" : "needs_review");
+  return {
+    status,
+    score: Number.isFinite(scoreValue) ? Math.max(0, Math.min(100, Math.round(scoreValue))) : null,
+    reason: parsed?.reason || result?.error || "VLM 未返回结构化审查说明",
+    issues: Array.isArray(parsed?.issues) ? parsed.issues : [],
+    suggestedLabel: parsed?.suggested_label || parsed?.suggestedLabel || "",
+    reviewedAt: new Date().toISOString(),
+    reviewerModel,
+    promptVersion: VLM_REVIEW_VERSION,
+    viewKeys,
+    rawText: result?.text || result?.error || ""
+  };
+};
+
+const fetchSegmentReviewImages = async (modelId, segId, viewKeys) => {
+  const images = [];
+  for (const viewKey of viewKeys) {
+    try {
+      const blob = await getSegmentLabelImage(modelId, segId, viewKey);
+      images.push({
+        data: blob,
+        filename: `${modelId}_seg${segId}_${viewKey}.png`,
+        mimeType: blob.type || "image/png"
+      });
+    } catch (err) {
+      console.warn(`[VLM审查] 缺少截图 model=${modelId}, seg=${segId}, view=${viewKey}:`, err?.message || err);
+    }
+  }
+  return images;
+};
+
+const reviewSegmentWithVlm = async (file, infoData, segment, vlmReviewConfig) => {
+  const viewKeys = Array.isArray(infoData.metadata?.viewKeys) && infoData.metadata.viewKeys.length
+    ? infoData.metadata.viewKeys
+    : ["main", "top", "side", "axial"];
+  const images = await fetchSegmentReviewImages(file.id, segment.id, viewKeys);
+  if (!images.length) {
+    return {
+      ...buildLocalLabelReview(segment),
+      status: "needs_review",
+      score: 0,
+      reason: "未找到该 segment 的多视角截图证据，无法进行 VLM 审查",
+      issues: ["missing_segment_images"],
+      reviewerModel: vlmReviewConfig.modelName,
+      promptVersion: VLM_REVIEW_VERSION,
+      viewKeys
+    };
+  }
+
+  const prompt = buildVlmReviewPrompt(segment, file.name);
+  const result = await vlmClient.generateWithImages(prompt, images, {
+    temperature: 0,
+    maxTokens: 1024
+  });
+  return normalizeVlmReview(result, vlmReviewConfig.modelName, viewKeys);
+};
+
+const updateBatchReviewProgress = () => {
+  const elapsed = Date.now() - batchStartTime.value;
+  const avgTime = processedCount.value > 0 ? elapsed / processedCount.value : 0;
+  const remaining = totalCount.value - processedCount.value;
+  const remainingMs = avgTime * remaining;
+  if (processedCount.value > 0) {
+    const minutes = Math.floor(remainingMs / 60000);
+    const seconds = Math.floor((remainingMs % 60000) / 1000);
+    remainingTime.value = `${minutes}分${seconds}秒`;
+  }
+};
+
+const handleBatchReview = async () => {
+  const currentPageVal = unref(fileListRef.value?.currentPage) || 1;
+  const pageSizeVal = unref(fileListRef.value?.pageSize) || 10;
+  const vlmReviewConfig = getVlmReviewConfig();
+
+  let response;
+  try {
+    response = await getServerFileList("labeled", currentPageVal, pageSizeVal);
+  } catch (err) {
+    ElMessage.error("获取已打标文件失败: " + (err?.message || err));
+    return;
+  }
+
+  const files = response.files || [];
+  if (!files.length) {
+    ElMessage.info("当前页没有已打标文件可审查");
+    return;
+  }
+
+  isBatchProcessing.value = true;
+  processedCount.value = 0;
+  batchStartTime.value = Date.now();
+  remainingTime.value = "计算中...";
+
+  const labelPayloads = [];
+  for (const file of files) {
+    try {
+      const labelsResponse = await getModelLabels(file.id);
+      const infoData = labelsResponse?.data || {};
+      const segments = Array.isArray(infoData.segments) ? infoData.segments : [];
+      if (segments.length) {
+        labelPayloads.push({ file, infoData, segments });
+      }
+    } catch (err) {
+      console.warn(`[批量审查] 跳过 ${file.name}: 读取标签失败`, err?.message || err);
+    }
+  }
+
+  totalCount.value = labelPayloads.reduce((sum, item) => sum + item.segments.length, 0);
+  if (!totalCount.value) {
+    isBatchProcessing.value = false;
+    ElMessage.warning("当前页没有可审查的 segment 标签");
+    return;
+  }
+
+  if (vlmReviewConfig) {
+    vlmClient.init({
+      baseUrl: vlmReviewConfig.baseUrl,
+      apiKey: vlmReviewConfig.apiKey,
+      modelName: vlmReviewConfig.modelName,
+      temperature: 0
+    });
+    ElMessage.info(`开始 VLM 图像审查 ${labelPayloads.length} 个模型的 ${totalCount.value} 个 segment 标签`);
+  } else {
+    ElMessage.info(`未配置 VLM API，使用本地规则审查 ${totalCount.value} 个 segment 标签`);
+  }
+
+  try {
+    for (const payload of labelPayloads) {
+      const { file, infoData } = payload;
+      const reviewedSegments = [];
+      for (const segment of payload.segments) {
+        let review;
+        try {
+          review = vlmReviewConfig
+            ? await reviewSegmentWithVlm(file, infoData, segment, vlmReviewConfig)
+            : buildLocalLabelReview(segment);
+        } catch (err) {
+          console.warn(`[批量审查] segment ${segment.id} 审查失败，回退本地规则:`, err?.message || err);
+          review = {
+            ...buildLocalLabelReview(segment),
+            status: "error",
+            reason: `审查调用失败：${err?.message || err}`,
+            reviewerModel: vlmReviewConfig?.modelName || "local-rules"
+          };
+        }
+        editPanel.value?.updateSegmentReview?.(segment.id, review);
+        processedCount.value++;
+        updateBatchReviewProgress();
+        reviewedSegments.push({ ...segment, review });
+      }
+
+      const summary = reviewedSegments.reduce((acc, seg) => {
+        const status = seg.review?.status || "unknown";
+        acc[status] = (acc[status] || 0) + 1;
+        return acc;
+      }, {});
+
+      await saveModelLabels(file.id, {
+        ...infoData,
+        segments: reviewedSegments,
+        reviewSummary: {
+          ...summary,
+          reviewedAt: new Date().toISOString(),
+          reviewerModel: vlmReviewConfig?.modelName || "local-rules",
+          promptVersion: vlmReviewConfig ? VLM_REVIEW_VERSION : REVIEW_VERSION
+        },
+        metadata: {
+          ...(infoData.metadata || {}),
+          reviewedAt: new Date().toISOString(),
+          reviewerModel: vlmReviewConfig?.modelName || "local-rules",
+          reviewPromptVersion: vlmReviewConfig ? VLM_REVIEW_VERSION : REVIEW_VERSION
+        }
+      });
+    }
+
+    ElMessage.success(`${vlmReviewConfig ? "VLM 图像" : "本地规则"}审查完成，审查结果已写入标签数据`);
+    await fileListRef.value?.loadFileList?.();
+  } catch (err) {
+    console.error("[批量审查] 处理失败:", err);
+    ElMessage.error("批量审查失败: " + (err?.message || err));
+  } finally {
+    isBatchProcessing.value = false;
+    remainingTime.value = "";
+  }
+};
+
 // 预分割下一批次（流水线：打标当前页时，后台触发下一页的服务端分割）
 /**
  * 确保模型已完成分割。若尚未分割则自动触发，然后轮询直到完成。
@@ -1196,7 +1538,11 @@ const waitForSegmentation = async (modelId, numClusters = 10, method = 'agglomer
       const s = await getSegmentStatus(modelId);
       console.log(`[分割等待] ${modelId} 状态: ${s.status}, hasSegments: ${s.hasSegments}`);
       if (s.hasSegments || s.status === 'segmented') return;
+      if (s.status === 'raw' && !s.hasSegments) {
+        throw new Error(`SEGMENT_FAILED: ${s.error || `model ${modelId} segmentation failed`}`);
+      }
     } catch (pollErr) {
+      if (pollErr.message?.includes('SEGMENT_FAILED')) throw pollErr;
       if (pollErr.message?.includes('分割失败')) throw pollErr;
       console.warn(`[分割等待] 轮询状态失败，继续重试:`, pollErr.message);
     }
@@ -1670,6 +2016,32 @@ onBeforeUnmount(() => {
         font-size: 13px;
         line-height: 1.5;
         min-height: 32px;
+        word-break: break-word;
+      }
+      .semantic-review-block {
+        margin-top: 10px;
+        padding-top: 8px;
+        border-top: 1px solid rgba(143, 163, 255, 0.18);
+      }
+      .semantic-review-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 6px;
+        color: #8fa3ff;
+        font-size: 11px;
+      }
+      .semantic-review-score {
+        margin-bottom: 4px;
+        color: #d7ddff;
+        font-size: 12px;
+      }
+      .semantic-review-reason {
+        max-height: 90px;
+        overflow-y: auto;
+        color: #d7dce8;
+        font-size: 12px;
+        line-height: 1.45;
         word-break: break-word;
       }
     }

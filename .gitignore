@@ -25,6 +25,13 @@ pnpm-lock.yaml*
 logs/
 *.log
 
+# Generated dependency/runtime caches
+.pnpm-store/
+pnpm-workspace.yaml
+__pycache__/
+*.py[cod]
+partfield-ckpt/
+
 # 自动化批量打标相关
 .server.pid
 .frontend.pid

@@ -52,6 +52,11 @@ const INFERENCE_URL  = `http://127.0.0.1:${INFERENCE_PORT}`;
 let inferenceReady   = false;
 let inferenceProcess = null;
 let inferenceRestarting = false;
+const PYTHON_CHILD_ENV = {
+  ...process.env,
+  PYTHONIOENCODING: 'utf-8',
+  PYTHONUTF8: '1',
+};
 
 function startInferenceServer() {
   const pythonCmd = process.env.PYTHON_CMD || 'python';
@@ -76,7 +81,10 @@ function startInferenceServer() {
   ];
   if (fp16) serverArgs.push('--fp16');
 
-  inferenceProcess = spawn(pythonCmd, serverArgs, { cwd: PROJECT_ROOT });
+  inferenceProcess = spawn(pythonCmd, serverArgs, {
+    cwd: PROJECT_ROOT,
+    env: PYTHON_CHILD_ENV,
+  });
 
   inferenceProcess.stdout.on('data', d =>
     process.stdout.write(`[InferenceServer] ${d}`));
@@ -195,18 +203,30 @@ function spawnSegmentProcess(id, numClusters, method, meta, nPointPerFace, nSamp
   if (autoMaxClusters != null) args.push('--auto_max_clusters', String(autoMaxClusters));
   if (autoMethod != null)      args.push('--auto_method', autoMethod);
 
-  const child = spawn(pythonCmd, args, { cwd: PROJECT_ROOT });
+  const child = spawn(pythonCmd, args, {
+    cwd: PROJECT_ROOT,
+    env: PYTHON_CHILD_ENV,
+  });
+  let stderrTail = '';
 
   child.stdout.on('data', d => process.stdout.write(`[PartField:${id}] ${d}`));
-  child.stderr.on('data', d => process.stderr.write(`[PartField:${id}] ${d}`));
+  child.stderr.on('data', d => {
+    const text = d.toString();
+    stderrTail = (stderrTail + text).slice(-4000);
+    process.stderr.write(`[PartField:${id}] ${d}`);
+  });
 
   child.on('close', code => {
     const current = readMeta(id) || meta;
     if (code === 0) {
-      writeMeta(id, { ...current, status: 'segmented' });
+      writeMeta(id, { ...current, status: 'segmented', segmentError: null });
       console.log(`✅ 分割完成 (fallback): ${id}`);
     } else {
-      writeMeta(id, { ...current, status: 'raw' });
+      writeMeta(id, {
+        ...current,
+        status: 'raw',
+        segmentError: stderrTail.trim() || `segment process exited with code ${code}`
+      });
       console.error(`❌ 分割失败 (fallback): ${id}, exit code ${code}`);
     }
   });
@@ -691,7 +711,7 @@ app.post('/api/models/:id/segment', (req, res) => {
       return res.status(409).json({ error: '分割正在进行中' });
     }
 
-    writeMeta(id, { ...meta, status: 'segmenting' });
+    writeMeta(id, { ...meta, status: 'segmenting', segmentError: null });
 
     const mode = inferenceReady ? 'preloaded' : 'fallback';
     console.log(`[Segment] ${id}: 使用 ${mode} 模式`);
@@ -701,17 +721,17 @@ app.post('/api/models/:id/segment', (req, res) => {
         .then(result => {
           if (result.success) {
             const current = readMeta(id) || meta;
-            writeMeta(id, { ...current, status: 'segmented' });
+            writeMeta(id, { ...current, status: 'segmented', segmentError: null });
             console.log(`✅ 分割完成: ${id} (${result.elapsed}s)`);
           } else {
             const current = readMeta(id) || meta;
-            writeMeta(id, { ...current, status: 'raw' });
+            writeMeta(id, { ...current, status: 'raw', segmentError: result.error || 'segmentation failed' });
             console.error(`❌ 分割失败: ${id}: ${result.error}`);
           }
         })
         .catch(err => {
           const current = readMeta(id) || meta;
-          writeMeta(id, { ...current, status: 'raw' });
+          writeMeta(id, { ...current, status: 'raw', segmentError: err.message || 'inference service call failed' });
           console.error(`❌ 推理服务调用失败: ${id}: ${err.message}`);
         });
     } else {
@@ -752,6 +772,7 @@ app.get('/api/models/:id/segment', (req, res) => {
       success: true,
       status: meta.status,
       hasSegments: fs.existsSync(path.join(segDir, 'face_labels.json')),
+      error: meta.segmentError || null,
       config
     });
   } catch (err) {
@@ -888,6 +909,39 @@ app.get('/api/models/:id/labels', (req, res) => {
 });
 
 // ────────────────────────────────────────────────────────────
+// GET /api/models/:id/labels/images/segments/:segId/:viewKey — 读取分割块截图
+// ────────────────────────────────────────────────────────────
+app.get('/api/models/:id/labels/images/segments/:segId/:viewKey', (req, res) => {
+  try {
+    const { id, segId, viewKey } = req.params;
+    if (!/^[\w.-]+$/.test(id) || !/^[\w.-]+$/.test(String(segId)) || !/^[\w.-]+$/.test(viewKey)) {
+      return res.status(400).json({ error: '参数包含非法字符' });
+    }
+
+    const imagePath = path.resolve(
+      MODELS_DIR,
+      id,
+      'labels',
+      'images',
+      'segments',
+      String(segId),
+      `${viewKey}.png`
+    );
+    const allowedRoot = path.resolve(MODELS_DIR, id, 'labels', 'images', 'segments');
+    if (!imagePath.startsWith(allowedRoot + path.sep)) {
+      return res.status(400).json({ error: '非法图片路径' });
+    }
+    if (!fs.existsSync(imagePath)) {
+      return res.status(404).json({ error: '分割块截图不存在' });
+    }
+
+    res.sendFile(imagePath);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ────────────────────────────────────────────────────────────
 // POST /api/models/:id/filter  — 标记为已过滤
 // body: { filterMetrics }
 // ────────────────────────────────────────────────────────────
@@ -977,18 +1031,27 @@ app.post('/api/vlm-proxy', async (req, res) => {
     const { baseUrl: rawBaseUrl, apiKey, requestBody, headers: customHeaders = {} } = req.body;
     if (!rawBaseUrl) return res.status(400).json({ error: 'baseUrl参数缺失' });
 
-    let baseUrl = rawBaseUrl.replace(/\/+$/, '');
-    if (baseUrl.endsWith('/v1')) baseUrl = baseUrl.slice(0, -3);
+    const baseUrl = String(rawBaseUrl).trim().replace(/\/+$/, '');
+    const chatCompletionsUrl = /\/chat\/completions$/i.test(baseUrl)
+      ? baseUrl
+      : /\/v1$/i.test(baseUrl)
+        ? `${baseUrl}/chat/completions`
+        : `${baseUrl}/v1/chat/completions`;
 
+    const cleanApiKey = String(apiKey || '').trim().replace(/^Bearer\s+/i, '');
     const proxyHeaders = { 'Content-Type': 'application/json', ...customHeaders };
-    if (apiKey) proxyHeaders['Authorization'] = `Bearer ${apiKey}`;
+    if (cleanApiKey) proxyHeaders['Authorization'] = `Bearer ${cleanApiKey}`;
 
     const axios = require('axios');
-    const response = await axios.post(`${baseUrl}/v1/chat/completions`, requestBody, {
+    const response = await axios.post(chatCompletionsUrl, requestBody, {
       headers: proxyHeaders,
       timeout: 300000,
       validateStatus: () => true
     });
+    if (response.status >= 400) {
+      const keyHint = cleanApiKey ? `${cleanApiKey.slice(0, 6)}...${cleanApiKey.slice(-4)}` : 'missing';
+      console.warn(`[VLM Proxy] upstream ${response.status}: model=${requestBody?.model || 'unknown'}, key=${keyHint}, url=${chatCompletionsUrl}`);
+    }
     res.status(response.status).json(response.data);
   } catch (err) {
     console.error('[VLM Proxy] 代理请求失败:', err.message);
